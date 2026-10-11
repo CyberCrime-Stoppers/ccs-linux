@@ -8,7 +8,7 @@
 | `/opt/<vendor>/bin` | Self-contained third-party packages (Chrome, some commercial apps) | Varies |
 | `/snap/bin` | Snap package shims | All users |
 
-**What lives where, concretely:**
+**What lives where, concretely if you were to have CCS Install Apps:**
 
 - **`/bin`** (traditional) may containe: `pdua`, `proton-drive`, 
 - **`/bin/usr`** (traditional): `pdua`,`proton-drive`,
