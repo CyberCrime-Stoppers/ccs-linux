@@ -4,7 +4,7 @@
 
 | Tier | Examples | Notes |
 |---|---|---|
-| **Native Linux builds** | CS2, Dota 2, Left 4 Dead 2, all Valve titles, Minecraft, Baldur's Gate 3, Cyberpunk 2077 | Best performance; no translation layer |
+| **Native Linux builds** | CS2, Dota 2, Left 4 Dead 2, all Valve titles, Minecraft, Baldur's Gate 3, Cyberpunk 2077, RobloxLauncher-Vingar, Sober. | Best performance; no translation layer |
 | **Proton Verified/platinum** | Elden Ring, Witcher 3, Doom Eternal, God of War, Monster Hunter Rise, Deep Rock Galactic | Effectively flawless, occasionally minor tweaks |
 | **Gold — works with tweaks** | GTA V (story mode), Apex Legends*¹, many Ubisoft titles | May need Proton GE or launch options |
 | **Broken — kernel-mode anticheat** | Valorant², Fortnite, Rainbow Six Siege, Destiny 2, PUBG, Roblox | Developers must flip a switch to support Proton; most actively refuse |
