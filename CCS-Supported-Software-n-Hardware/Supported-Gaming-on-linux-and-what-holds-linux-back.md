@@ -17,9 +17,9 @@
 **Practical points for your machines:**
 
 - **ProtonDB** (protondb.com) is the community rating tracker — always check a specific title there before purchase; it aggregates thousands of user reports per game.
-- **ProtonUp-Qt** lets you install GE-Proton builds (community forks with extra media codecs and fixes — relevant given your codec troubleshooting history on Zorin). If a game stutters or lacks video playback in cutscenes, GE-Proton usually fixes it.
-- **Non-Steam launchers** (EA App, Battle.net, Epic, Ubisoft Connect) run via Lutris, Heroic Games Launcher, or Bottles. Heroic is the cleanest for Epic/GOG native Linux clients. Lutris can also handle your Minecraft + OptiFine setup without Steam at all.
+- **ProtonUp-Qt** lets users install GE-Proton builds (community forks with extra media codecs and fixes — relevant given your codec troubleshooting history on Zorin). If a game stutters or lacks video playback in cutscenes, GE-Proton usually fixes it.
+- **Non-Steam launchers** (EA App, Battle.net, Epic, Ubisoft Connect) run via Lutris, Heroic Games Launcher, or Bottles. Heroic is the cleanest for Epic/GOG native Linux clients. Lutris can also handle Minecraft + OptiFine setup without Steam at all.
 - **GOG games** work via Heroic or Lutris; DRM-free installs sidestep launcher headaches entirely.
-- **GPU note:** AMD gives near-zero-friction Vulkan/DXVK performance. Given your DaVinci Resolve GPU debugging on Zorin, if either rig runs NVIDIA, the proprietary driver (not nouveau) is essential — Proton is basically unusable otherwise.
+- **GPU note:** AMD gives near-zero-friction Vulkan/DXVK performance. if either rig runs NVIDIA, the proprietary driver (not nouveau) is essential — Proton is basically unusable otherwise.
 
 **Desktop environment doesn't matter much** — KDE Neon and Zorin OS both sit on top of the same kernel/graphics stack, so game compatibility is identical. Performance differences between DEs are negligible for fullscreen games.
