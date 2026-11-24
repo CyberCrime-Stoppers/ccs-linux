@@ -18,9 +18,11 @@
 #include <linux/interrupt.h>
 #include <linux/math.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/pm.h>
 #include <linux/pm_runtime.h>
 #include <linux/property.h>
+#include <linux/reboot.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
@@ -30,12 +32,20 @@
 #include <sound/cs-amp-lib.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
+#include <sound/sdw.h>
 #include <sound/soc.h>
 #include <sound/soc-dapm.h>
 #include <sound/tlv.h>
 
 #include "wm_adsp.h"
 #include "cs35l56.h"
+
+/*
+ * snd_soc_register_component() can call component_probe() on all instances
+ * in a card, so deferred registration must be protected across all instances.
+ */
+static DEFINE_MUTEX(cs35l56_component_register_lock);
+static bool cs35l56_shutting_down;
 
 void cs35l56_mask_soundwire_interrupts(struct cs35l56_private *cs35l56)
 {
@@ -168,41 +178,91 @@ static const struct snd_kcontrol_new cs35l63_controls[] = {
 			 SNDRV_CTL_ELEM_ACCESS_READ | SNDRV_CTL_ELEM_ACCESS_VOLATILE),
 };
 
+static int cs35l56_asp_tx_get(struct snd_kcontrol *kcontrol,
+			      struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_dapm_context *dapm = snd_soc_dapm_kcontrol_to_dapm(kcontrol);
+	struct snd_soc_component *component = snd_soc_dapm_to_component(dapm);
+	struct cs35l56_private *cs35l56 = snd_soc_component_get_drvdata(component);
+	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
+
+	snd_soc_dapm_mutex_lock(dapm);
+	ucontrol->value.enumerated.item[0] =
+		snd_soc_enum_val_to_item(e, cs35l56->asp_tx_input[e->shift_l]);
+	snd_soc_dapm_mutex_unlock(dapm);
+
+	return 0;
+}
+
+static int cs35l56_asp_tx_put(struct snd_kcontrol *kcontrol,
+			      struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_dapm_context *dapm = snd_soc_dapm_kcontrol_to_dapm(kcontrol);
+	struct snd_soc_component *component = snd_soc_dapm_to_component(dapm);
+	struct cs35l56_private *cs35l56 = snd_soc_component_get_drvdata(component);
+	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
+	unsigned int item = ucontrol->value.enumerated.item[0];
+	unsigned int val;
+	bool change = false;
+
+	if (item >= e->items)
+		return -EINVAL;
+
+	val = snd_soc_enum_item_to_val(e, item);
+
+	snd_soc_dapm_mutex_lock(dapm);
+	if (cs35l56->asp_tx_input[e->shift_l] != val)
+		change = true;
+
+	cs35l56->asp_tx_input[e->shift_l] = val;
+	snd_soc_dapm_mutex_unlock(dapm);
+
+	if (change)
+		snd_soc_dapm_mux_update_power(dapm, kcontrol, item, e, NULL);
+
+	return change;
+}
+
+/* The shift field of each virtual enum holds the ASP TX channel index. */
 static SOC_VALUE_ENUM_SINGLE_DECL(cs35l56_asp1tx1_enum,
-				  CS35L56_ASP1TX1_INPUT,
+				  SND_SOC_NOPM,
 				  0, CS35L56_ASP_TXn_SRC_MASK,
 				  cs35l56_tx_input_texts,
 				  cs35l56_tx_input_values);
 
 static const struct snd_kcontrol_new asp1_tx1_mux =
-	SOC_DAPM_ENUM("ASP1TX1 SRC", cs35l56_asp1tx1_enum);
+	SOC_DAPM_ENUM_EXT("ASP1TX1 SRC", cs35l56_asp1tx1_enum,
+			  cs35l56_asp_tx_get, cs35l56_asp_tx_put);
 
 static SOC_VALUE_ENUM_SINGLE_DECL(cs35l56_asp1tx2_enum,
-				  CS35L56_ASP1TX2_INPUT,
-				  0, CS35L56_ASP_TXn_SRC_MASK,
+				  SND_SOC_NOPM,
+				  1, CS35L56_ASP_TXn_SRC_MASK,
 				  cs35l56_tx_input_texts,
 				  cs35l56_tx_input_values);
 
 static const struct snd_kcontrol_new asp1_tx2_mux =
-	SOC_DAPM_ENUM("ASP1TX2 SRC", cs35l56_asp1tx2_enum);
+	SOC_DAPM_ENUM_EXT("ASP1TX2 SRC", cs35l56_asp1tx2_enum,
+			  cs35l56_asp_tx_get, cs35l56_asp_tx_put);
 
 static SOC_VALUE_ENUM_SINGLE_DECL(cs35l56_asp1tx3_enum,
-				  CS35L56_ASP1TX3_INPUT,
-				  0, CS35L56_ASP_TXn_SRC_MASK,
+				  SND_SOC_NOPM,
+				  2, CS35L56_ASP_TXn_SRC_MASK,
 				  cs35l56_tx_input_texts,
 				  cs35l56_tx_input_values);
 
 static const struct snd_kcontrol_new asp1_tx3_mux =
-	SOC_DAPM_ENUM("ASP1TX3 SRC", cs35l56_asp1tx3_enum);
+	SOC_DAPM_ENUM_EXT("ASP1TX3 SRC", cs35l56_asp1tx3_enum,
+			  cs35l56_asp_tx_get, cs35l56_asp_tx_put);
 
 static SOC_VALUE_ENUM_SINGLE_DECL(cs35l56_asp1tx4_enum,
-				  CS35L56_ASP1TX4_INPUT,
-				  0, CS35L56_ASP_TXn_SRC_MASK,
+				  SND_SOC_NOPM,
+				  3, CS35L56_ASP_TXn_SRC_MASK,
 				  cs35l56_tx_input_texts,
 				  cs35l56_tx_input_values);
 
 static const struct snd_kcontrol_new asp1_tx4_mux =
-	SOC_DAPM_ENUM("ASP1TX4 SRC", cs35l56_asp1tx4_enum);
+	SOC_DAPM_ENUM_EXT("ASP1TX4 SRC", cs35l56_asp1tx4_enum,
+			  cs35l56_asp_tx_get, cs35l56_asp_tx_put);
 
 static SOC_VALUE_ENUM_SINGLE_DECL(cs35l56_sdw1tx1_enum,
 				CS35L56_SWIRE_DP3_CH1_INPUT,
@@ -272,6 +332,40 @@ static int cs35l56_play_event(struct snd_soc_dapm_widget *w,
 	}
 }
 
+static int cs35l56_asp_event(struct snd_soc_dapm_widget *w,
+			     struct snd_kcontrol *kcontrol, int event)
+{
+	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
+	struct cs35l56_private *cs35l56 = snd_soc_component_get_drvdata(component);
+
+	return regmap_assign_bits(cs35l56->base.regmap, CS35L56_ASP1_ENABLES1,
+				  BIT(w->shift),
+				  SND_SOC_DAPM_EVENT_ON(event));
+}
+
+static int cs35l56_asp_tx_event(struct snd_soc_dapm_widget *w,
+				struct snd_kcontrol *kcontrol, int event)
+{
+	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
+	struct cs35l56_private *cs35l56 = snd_soc_component_get_drvdata(component);
+	int ret;
+
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
+		ret = regmap_write(cs35l56->base.regmap,
+				   CS35L56_ASP1TX1_INPUT + (4 * w->shift),
+				   cs35l56->asp_tx_input[w->shift]);
+		if (ret)
+			return ret;
+
+		break;
+	default:
+		break;
+	}
+
+	return cs35l56_asp_event(w, kcontrol, event);
+}
+
 static const struct snd_soc_dapm_widget cs35l56_dapm_widgets[] = {
 	SND_SOC_DAPM_REGULATOR_SUPPLY("VDD_B", 0, 0),
 	SND_SOC_DAPM_REGULATOR_SUPPLY("VDD_AMP", 0, 0),
@@ -285,18 +379,25 @@ static const struct snd_soc_dapm_widget cs35l56_dapm_widgets[] = {
 	SND_SOC_DAPM_PGA_E("DSP1", SND_SOC_NOPM, 0, 0, NULL, 0, cs35l56_dsp_event,
 			   SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_PRE_PMD),
 
-	SND_SOC_DAPM_AIF_IN("ASP1RX1", NULL, 0, CS35L56_ASP1_ENABLES1,
-			    CS35L56_ASP_RX1_EN_SHIFT, 0),
-	SND_SOC_DAPM_AIF_IN("ASP1RX2", NULL, 1, CS35L56_ASP1_ENABLES1,
-			    CS35L56_ASP_RX2_EN_SHIFT, 0),
-	SND_SOC_DAPM_AIF_OUT("ASP1TX1", NULL, 0, CS35L56_ASP1_ENABLES1,
-			     CS35L56_ASP_TX1_EN_SHIFT, 0),
-	SND_SOC_DAPM_AIF_OUT("ASP1TX2", NULL, 1, CS35L56_ASP1_ENABLES1,
-			     CS35L56_ASP_TX2_EN_SHIFT, 0),
-	SND_SOC_DAPM_AIF_OUT("ASP1TX3", NULL, 2, CS35L56_ASP1_ENABLES1,
-			     CS35L56_ASP_TX3_EN_SHIFT, 0),
-	SND_SOC_DAPM_AIF_OUT("ASP1TX4", NULL, 3, CS35L56_ASP1_ENABLES1,
-			     CS35L56_ASP_TX4_EN_SHIFT, 0),
+	/* Avoid reading ASP1_ENABLES1 when DAPM initializes the widgets. */
+	SND_SOC_DAPM_AIF_IN_E("ASP1RX1", NULL, 0, SND_SOC_NOPM,
+			      CS35L56_ASP_RX1_EN_SHIFT, 0,
+			      cs35l56_asp_event, SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+	SND_SOC_DAPM_AIF_IN_E("ASP1RX2", NULL, 1, SND_SOC_NOPM,
+			      CS35L56_ASP_RX2_EN_SHIFT, 0,
+			      cs35l56_asp_event, SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+	SND_SOC_DAPM_AIF_OUT_E("ASP1TX1", NULL, 0, SND_SOC_NOPM,
+			       CS35L56_ASP_TX1_EN_SHIFT, 0,
+			       cs35l56_asp_tx_event, SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+	SND_SOC_DAPM_AIF_OUT_E("ASP1TX2", NULL, 1, SND_SOC_NOPM,
+			       CS35L56_ASP_TX2_EN_SHIFT, 0,
+			       cs35l56_asp_tx_event, SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+	SND_SOC_DAPM_AIF_OUT_E("ASP1TX3", NULL, 2, SND_SOC_NOPM,
+			       CS35L56_ASP_TX3_EN_SHIFT, 0,
+			       cs35l56_asp_tx_event, SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+	SND_SOC_DAPM_AIF_OUT_E("ASP1TX4", NULL, 3, SND_SOC_NOPM,
+			       CS35L56_ASP_TX4_EN_SHIFT, 0,
+			       cs35l56_asp_tx_event, SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
 
 	SND_SOC_DAPM_MUX("ASP1 TX1 Source", SND_SOC_NOPM, 0, 0, &asp1_tx1_mux),
 	SND_SOC_DAPM_MUX("ASP1 TX2 Source", SND_SOC_NOPM, 0, 0, &asp1_tx2_mux),
@@ -315,6 +416,7 @@ static const struct snd_soc_dapm_widget cs35l56_dapm_widgets[] = {
 	SND_SOC_DAPM_SIGGEN("VDDBMON ADC"),
 	SND_SOC_DAPM_SIGGEN("VBSTMON ADC"),
 	SND_SOC_DAPM_SIGGEN("TEMPMON ADC"),
+	SND_SOC_DAPM_SIGGEN("OT25 Reference"),
 
 	SND_SOC_DAPM_INPUT("Calibrate"),
 };
@@ -379,6 +481,8 @@ static const struct snd_soc_dapm_route cs35l56_audio_map[] = {
 	{ "SDW1 Capture", NULL, "SDW1 TX2 Source" },
 	{ "SDW1 Capture", NULL, "SDW1 TX3 Source" },
 	{ "SDW1 Capture", NULL, "SDW1 TX4 Source" },
+
+	{ "OT25", NULL, "OT25 Reference" },
 };
 
 static int cs35l56_dsp_event(struct snd_soc_dapm_widget *w,
@@ -396,7 +500,7 @@ static int cs35l56_asp_dai_probe(struct snd_soc_dai *codec_dai)
 {
 	struct cs35l56_private *cs35l56 = snd_soc_component_get_drvdata(codec_dai->component);
 
-	return cs35l56_set_asp_patch(&cs35l56->base);
+	return cs35l56_set_asp_defaults(&cs35l56->base);
 }
 
 static int cs35l56_asp_dai_set_fmt(struct snd_soc_dai *codec_dai, unsigned int fmt)
@@ -604,12 +708,22 @@ static int cs35l56_asp_dai_set_sysclk(struct snd_soc_dai *dai,
 	return 0;
 }
 
+static const u64 cs35l56_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_IF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_IF;
+
 static const struct snd_soc_dai_ops cs35l56_ops = {
 	.probe = cs35l56_asp_dai_probe,
 	.set_fmt = cs35l56_asp_dai_set_fmt,
 	.set_tdm_slot = cs35l56_asp_dai_set_tdm_slot,
 	.hw_params = cs35l56_asp_dai_hw_params,
 	.set_sysclk = cs35l56_asp_dai_set_sysclk,
+	.auto_selectable_formats = &cs35l56_selectable_formats,
+	.num_auto_selectable_formats = 1,
 };
 
 static void cs35l56_sdw_dai_shutdown(struct snd_pcm_substream *substream,
@@ -703,10 +817,48 @@ static int cs35l56_sdw_dai_set_stream(struct snd_soc_dai *dai,
 	return 0;
 }
 
+static int cs35l56_ot25_dai_hw_params(struct snd_pcm_substream *substream,
+				      struct snd_pcm_hw_params *params,
+				      struct snd_soc_dai *dai)
+{
+	struct cs35l56_private *cs35l56 = snd_soc_component_get_drvdata(dai->component);
+	struct sdw_stream_runtime *sdw_stream = snd_soc_dai_get_dma_data(dai, substream);
+	struct sdw_stream_config sconfig = { };
+	struct sdw_port_config pconfig = { };
+	int ret;
+
+	dev_dbg(cs35l56->base.dev, "%s: rate %d\n", __func__, params_rate(params));
+
+	if (!cs35l56->base.init_done)
+		return -ENODEV;
+
+	if (!sdw_stream)
+		return -EINVAL;
+
+	snd_sdw_params_to_config(substream, params, &sconfig, &pconfig);
+	pconfig.num = CS35L56_OT25_CAPTURE_PORT;
+
+	ret = sdw_stream_add_slave(cs35l56->sdw_peripheral, &sconfig, &pconfig,
+				   1, sdw_stream);
+	if (ret) {
+		dev_err(dai->dev, "Failed to add OT25 stream: %d\n", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
 static const struct snd_soc_dai_ops cs35l56_sdw_dai_ops = {
 	.set_tdm_slot = cs35l56_sdw_dai_set_tdm_slot,
 	.shutdown = cs35l56_sdw_dai_shutdown,
 	.hw_params = cs35l56_sdw_dai_hw_params,
+	.hw_free = cs35l56_sdw_dai_hw_free,
+	.set_stream = cs35l56_sdw_dai_set_stream,
+};
+
+static const struct snd_soc_dai_ops cs35l56_ot25_dai_ops = {
+	.shutdown = cs35l56_sdw_dai_shutdown,
+	.hw_params = cs35l56_ot25_dai_hw_params,
 	.hw_free = cs35l56_sdw_dai_hw_free,
 	.set_stream = cs35l56_sdw_dai_set_stream,
 };
@@ -758,6 +910,18 @@ static struct snd_soc_dai_driver cs35l56_dai[] = {
 		},
 		.symmetric_rate = 1,
 		.ops = &cs35l56_sdw_dai_ops,
+	},
+	{
+		.name = "cs35l56-ot25",
+		.id = 3,
+		.capture = {
+			.stream_name = "OT25",
+			.channels_min = 1,
+			.channels_max = 2,
+			.rates = CS35L56_RATES,
+			.formats = CS35L56_TX_FORMATS,
+		},
+		.ops = &cs35l56_ot25_dai_ops,
 	},
 };
 
@@ -1365,11 +1529,7 @@ static int _cs35l56_component_probe(struct snd_soc_component *component)
 
 	BUILD_BUG_ON(ARRAY_SIZE(cs35l56_tx_input_texts) != ARRAY_SIZE(cs35l56_tx_input_values));
 
-	if (!wait_for_completion_timeout(&cs35l56->init_completion,
-					 msecs_to_jiffies(5000))) {
-		dev_err(cs35l56->base.dev, "%s: init_completion timed out\n", __func__);
-		return -ENODEV;
-	}
+	memset(&cs35l56->asp_tx_input, 0, sizeof(cs35l56->asp_tx_input));
 
 	cs35l56->dsp.part = kasprintf(GFP_KERNEL, "cs35l%02x", cs35l56->base.type);
 	if (!cs35l56->dsp.part)
@@ -1636,6 +1796,10 @@ int cs35l56_system_resume(struct device *dev)
 
 	dev_dbg(dev, "system_resume\n");
 
+	/* Assume the firmware reset to default until we can check it */
+	if (cs35l56->base.init_done)
+		cs35l56->needs_wait_for_fw_idle = true;
+
 	/*
 	 * We might have done a hard reset or the CS35L56 was power-cycled
 	 * so wait for control port to be ready.
@@ -1649,6 +1813,16 @@ int cs35l56_system_resume(struct device *dev)
 
 	if (ret)
 		return ret;
+
+	if (cs35l56->sdw_peripheral && cs35l56->base.init_done) {
+		ret = pm_runtime_resume_and_get(cs35l56->base.dev);
+		if (ret < 0)
+			return ret;
+
+		cs35l56->needs_wait_for_fw_idle =
+			cs35l56_needs_wait_for_firmware_timer_expiry(&cs35l56->base);
+		pm_runtime_put_autosuspend(cs35l56->base.dev);
+	}
 
 	/* Firmware won't have been loaded if the component hasn't probed */
 	if (!cs35l56->component)
@@ -1939,6 +2113,45 @@ static int cs35l56_try_get_broken_sdca_spkid_gpio(struct cs35l56_private *cs35l5
 	return ret;
 }
 
+static int cs35l56_component_register(struct cs35l56_private *cs35l56)
+{
+	int ret;
+
+	ret = snd_soc_register_component(cs35l56->base.dev,
+					 &soc_component_dev_cs35l56,
+					 cs35l56_dai, ARRAY_SIZE(cs35l56_dai));
+	if (ret < 0) {
+		dev_err(cs35l56->base.dev, "Register codec failed: %d\n", ret);
+		return ret;
+	}
+
+	cs35l56->component_registered = true;
+
+	return 0;
+}
+
+static void cs35l56_component_register_work(struct work_struct *work)
+{
+	struct cs35l56_private *cs35l56 = container_of(work,
+						       struct cs35l56_private,
+						       component_register_work);
+	int ret;
+
+	guard(mutex)(&cs35l56_component_register_lock);
+
+	if (cs35l56_shutting_down)
+		return;
+
+	PM_RUNTIME_ACQUIRE_AUTOSUSPEND(cs35l56->base.dev, pm_err);
+	ret = PM_RUNTIME_ACQUIRE_ERR(&pm_err);
+	if (ret) {
+		dev_err(cs35l56->base.dev, "register_work failed to get pm_runtime: %d\n", ret);
+		return;
+	}
+
+	cs35l56_component_register(cs35l56);
+}
+
 int cs35l56_common_probe(struct cs35l56_private *cs35l56, int irq)
 {
 	int ret;
@@ -1947,6 +2160,7 @@ int cs35l56_common_probe(struct cs35l56_private *cs35l56, int irq)
 	mutex_init(&cs35l56->base.irq_lock);
 	cs35l56->base.cal_index = -1;
 	cs35l56->speaker_id = -ENOENT;
+	INIT_WORK(&cs35l56->component_register_work, cs35l56_component_register_work);
 
 	dev_set_drvdata(cs35l56->base.dev, cs35l56);
 
@@ -2020,12 +2234,17 @@ int cs35l56_common_probe(struct cs35l56_private *cs35l56, int irq)
 	if (ret)
 		goto err_remove_wm_adsp;
 
-	ret = snd_soc_register_component(cs35l56->base.dev,
-					 &soc_component_dev_cs35l56,
-					 cs35l56_dai, ARRAY_SIZE(cs35l56_dai));
-	if (ret < 0) {
-		dev_err_probe(cs35l56->base.dev, ret, "Register codec failed\n");
-		goto err_free_irq;
+	/*
+	 * Defer calling snd_soc_register_component() on SoundWire to prevent
+	 * a deadlock where it calls our component_probe(), which requires the
+	 * SoundWire enumeration to complete, but because we are still in probe()
+	 * the SoundWire core will not call the update_status() callback. At time
+	 * of writing snd_soc_register_component() never returns EPROBE_DEFER.
+	 */
+	if (!cs35l56->sdw_peripheral) {
+		ret = cs35l56_component_register(cs35l56);
+		if (ret < 0)
+			goto err_free_irq;
 	}
 
 	return 0;
@@ -2055,6 +2274,7 @@ EXPORT_SYMBOL_NS_GPL(cs35l56_common_probe, "SND_SOC_CS35L56_CORE");
 
 int cs35l56_init(struct cs35l56_private *cs35l56)
 {
+	bool first_time_init = !cs35l56->base.init_done;
 	int ret;
 
 	/*
@@ -2122,14 +2342,19 @@ post_soft_reset:
 	/* Registers could be dirty after soft reset or SoundWire enumeration */
 	regcache_sync(cs35l56->base.regmap);
 
-	/* Set ASP1 DOUT to high-impedance when it is not transmitting audio data. */
-	ret = regmap_set_bits(cs35l56->base.regmap, CS35L56_ASP1_CONTROL3,
-			      CS35L56_ASP1_DOUT_HIZ_CTRL_MASK);
-	if (ret)
-		return dev_err_probe(cs35l56->base.dev, ret, "Failed to write ASP1_CONTROL3\n");
+	cs35l56->needs_wait_for_fw_idle =
+		cs35l56_needs_wait_for_firmware_timer_expiry(&cs35l56->base);
 
 	cs35l56->base.init_done = true;
 	complete_all(&cs35l56->init_completion);
+
+	if (cs35l56->sdw_peripheral && first_time_init) {
+		/*
+		 * Hardware now accessible, queue work to call
+		 * snd_soc_register_component().
+		 */
+		queue_work(system_freezable_wq, &cs35l56->component_register_work);
+	}
 
 	return 0;
 }
@@ -2137,7 +2362,9 @@ EXPORT_SYMBOL_NS_GPL(cs35l56_init, "SND_SOC_CS35L56_CORE");
 
 void cs35l56_remove(struct cs35l56_private *cs35l56)
 {
-	snd_soc_unregister_component(cs35l56->base.dev);
+	cancel_work_sync(&cs35l56->component_register_work);
+	if (cs35l56->component_registered)
+		snd_soc_unregister_component(cs35l56->base.dev);
 
 	cs35l56->base.init_done = false;
 
@@ -2171,6 +2398,37 @@ EXPORT_NS_GPL_DEV_PM_OPS(cs35l56_pm_ops_i2c_spi, SND_SOC_CS35L56_CORE) = {
 	NOIRQ_SYSTEM_SLEEP_PM_OPS(cs35l56_system_suspend_no_irq, cs35l56_system_resume_no_irq)
 };
 #endif
+
+static int cs35l56_reboot_notify(struct notifier_block *nb,
+				 unsigned long action, void *data)
+{
+	guard(mutex)(&cs35l56_component_register_lock);
+	cs35l56_shutting_down = true;
+
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block cs35l56_reboot_notifier = {
+	.notifier_call = cs35l56_reboot_notify,
+};
+
+static int __init cs35l56_modinit(void)
+{
+	/*
+	 * Use reboot notifier to prevent race between shutdown and
+	 * snd_soc_register_component(). Driver shutdown() callback would
+	 * run too late, after device_shutdown() is already walking the
+	 * device list that component registration can modify.
+	 */
+	return register_reboot_notifier(&cs35l56_reboot_notifier);
+}
+module_init(cs35l56_modinit);
+
+static void __exit cs35l56_modexit(void)
+{
+	unregister_reboot_notifier(&cs35l56_reboot_notifier);
+}
+module_exit(cs35l56_modexit);
 
 MODULE_DESCRIPTION("ASoC CS35L56 driver");
 MODULE_IMPORT_NS("SND_SOC_CS35L56_SHARED");

@@ -1726,8 +1726,8 @@ static int xol_add_vma(struct mm_struct *mm, struct xol_area *area)
 	}
 
 	vma = _install_special_mapping(mm, area->vaddr, PAGE_SIZE,
-				VM_EXEC|VM_MAYEXEC|VM_DONTCOPY|VM_IO|
-				VM_SEALED_SYSMAP,
+				VM_EXEC|VM_MAYEXEC|VM_DONTCOPY|
+				VM_MIXEDMAP|VM_SEALED_SYSMAP,
 				&xol_mapping);
 	if (IS_ERR(vma)) {
 		ret = PTR_ERR(vma);
@@ -2404,7 +2404,7 @@ static int is_trap_at_addr(struct mm_struct *mm, unsigned long vaddr)
 		return -EINVAL;
 
 	pagefault_disable();
-	result = __get_user(opcode, (uprobe_opcode_t __user *)vaddr);
+	result = get_user(opcode, (uprobe_opcode_t __user *)vaddr);
 	pagefault_enable();
 
 	if (likely(result == 0))
@@ -2701,6 +2701,15 @@ bool __weak arch_uretprobe_is_alive(struct return_instance *ret, enum rp_check c
 
 void __weak arch_uprobe_optimize(struct arch_uprobe *auprobe, unsigned long vaddr)
 {
+}
+
+/*
+ * Can a bpf prog write these bytes of pt_regs? An arch opts in and lists the
+ * registers that ptrace can set to any value.
+ */
+bool __weak arch_uprobe_regs_writable(int off, int size)
+{
+	return false;
 }
 
 /*

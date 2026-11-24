@@ -643,6 +643,8 @@ clear_event_triggers(struct trace_array *tr)
 		list_for_each_entry_safe(data, n, &file->triggers, list) {
 			trace_event_trigger_enable_disable(file, 0);
 			list_del_rcu(&data->list);
+			if (data->cmd_ops->trigger_type == ETT_EVENT_HIST)
+				hist_put_synth_event(file);
 			if (data->cmd_ops->free)
 				data->cmd_ops->free(data);
 		}
@@ -1728,7 +1730,8 @@ static void enable_trigger_private_data_free(struct event_trigger_data *data)
 {
 	struct enable_trigger_data *enable_data = data->private_data;
 
-	trace_event_put_ref(enable_data->file->event_call);
+	/* The file may already be freed here, only the call is kept alive */
+	trace_event_put_ref(enable_data->call);
 	kfree(enable_data);
 }
 
@@ -1801,6 +1804,7 @@ int event_enable_trigger_parse(struct event_command *cmd_ops,
 	enable_data->hist = hist;
 	enable_data->enable = enable;
 	enable_data->file = event_enable_file;
+	enable_data->call = event_enable_file->event_call;
 
 	trigger_data = trigger_data_alloc(cmd_ops, cmd, param, enable_data);
 	if (!trigger_data)

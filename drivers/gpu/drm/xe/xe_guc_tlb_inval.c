@@ -31,12 +31,22 @@
 static int send_tlb_inval(struct xe_guc *guc, const u32 *action, int len)
 {
 	struct xe_gt *gt = guc_to_gt(guc);
+	int ret;
 
 	xe_gt_assert(gt, action[1]);	/* Seqno */
 
 	xe_gt_stats_incr(gt, XE_GT_STATS_ID_TLB_INVAL, 1);
-	return xe_guc_ct_send(&guc->ct, action, len,
-			      G2H_LEN_DW_TLB_INVALIDATE, 1);
+	ret = xe_guc_ct_send(&guc->ct, action, len, G2H_LEN_DW_TLB_INVALIDATE, 1);
+
+	/*
+	 * A disabled CT can't deliver the request, and the GuC is reloaded
+	 * with all TLBs invalid before the CT is enabled again, so there is
+	 * nothing left to invalidate. Report it as cancelled, like a stopped CT.
+	 */
+	if (ret == -ENODEV)
+		return -ECANCELED;
+
+	return ret;
 }
 
 #define MAKE_INVAL_OP_FLUSH(type, flush_cache)	((type << XE_GUC_TLB_INVAL_TYPE_SHIFT) | \
@@ -96,6 +106,33 @@ static int send_tlb_inval_ggtt(struct xe_tlb_inval *tlb_inval, u32 seqno)
 	}
 
 	return -ECANCELED;
+}
+
+/*
+ * Emit INVAL_FULL (intra vf) to invalidate engine TLBs across all engines
+ * within the VF.
+ */
+static int send_tlb_inval_ggtt_full(struct xe_tlb_inval *tlb_inval, u32 seqno)
+{
+	struct xe_guc *guc = tlb_inval->private;
+	u32 action[] = {
+		XE_GUC_ACTION_TLB_INVALIDATION,
+		seqno,
+		MAKE_INVAL_OP(XE_GUC_TLB_INVAL_FULL),
+	};
+	int ret;
+
+	ret = send_tlb_inval(guc, action, ARRAY_SIZE(action));
+
+	/*
+	 * send_tlb_inval() may return -ENODEV (CT disabled at cold boot) or
+	 * -ENOTRECOVERABLE (device wedged); nothing runs on the engines in
+	 * either case, so treat as cancelled.
+	 */
+	if (ret == -ENODEV || ret == -ENOTRECOVERABLE)
+		return -ECANCELED;
+
+	return ret;
 }
 
 static int send_page_reclaim(struct xe_guc *guc, u32 seqno,
@@ -346,6 +383,7 @@ static long tlb_inval_timeout_delay(struct xe_tlb_inval *tlb_inval)
 static const struct xe_tlb_inval_ops guc_tlb_inval_asid_ops = {
 	.all = send_tlb_inval_all,
 	.ggtt = send_tlb_inval_ggtt,
+	.ggtt_full = send_tlb_inval_ggtt_full,
 	.ppgtt = send_tlb_inval_asid_ppgtt,
 	.initialized = tlb_inval_initialized,
 	.flush = tlb_inval_flush,
@@ -354,6 +392,7 @@ static const struct xe_tlb_inval_ops guc_tlb_inval_asid_ops = {
 
 static const struct xe_tlb_inval_ops guc_tlb_inval_ctx_ops = {
 	.ggtt = send_tlb_inval_ggtt,
+	.ggtt_full = send_tlb_inval_ggtt_full,
 	.all = send_tlb_inval_all,
 	.ppgtt = send_tlb_inval_ctx_ppgtt,
 	.initialized = tlb_inval_initialized,

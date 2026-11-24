@@ -36,9 +36,6 @@
 #define IP_VS_HDR_INVERSE	1
 #define IP_VS_HDR_ICMP		2
 
-/* Destination Server Flags */
-#define IP_VS_DEST_F_OVERLOAD	0x0002		/* server is overloaded */
-
 /* Destination Server Config Flags */
 #define IP_VS_DEST_CF_AVAILABLE	0x0001		/* server is available */
 
@@ -973,32 +970,43 @@ struct ip_vs_dest_dst {
  * and so on.
  */
 struct ip_vs_dest {
+	/* Cacheline for hash table nodes - read-mostly */
+
 	struct list_head	n_list;   /* for the dests in the service */
 	struct hlist_node	d_list;   /* for table with all the dests */
 
-	u16			af;		/* address family */
-	__be16			port;		/* port number of the server */
-	union nf_inet_addr	addr;		/* IP address of the server */
-	volatile unsigned int	flags;		/* dest status flags */
-	atomic_t		conn_flags;	/* flags to copy to conn */
 	atomic_t		weight;		/* server weight */
-	unsigned long		cflags;		/* config flags */
 	atomic_t		last_weight;	/* server latest weight */
+
+	/* connection thresholds */
+	u32			l_threshold_val;/* used lower threshold */
+	u32			u_threshold_val;/* used upper threshold */
+	/* 32/48 */
+	u32			l_threshold;	/* lower threshold */
+	u32			u_threshold;	/* upper threshold */
+
+	unsigned long		cflags;		/* config flags */
+
+	/* 44/64 */
+	atomic_t		conn_flags;	/* flags to copy to conn */
+
 	__u16			tun_type;	/* tunnel type */
 	__be16			tun_port;	/* tunnel port */
 	__u16			tun_flags;	/* tunnel flags */
 
+	u16			af;		/* address family */
+	__be16			port;		/* port number of the server */
+	/* 60/80 */
+	union nf_inet_addr	addr;		/* IP address of the server */
+
+	/* connection counters */
+	atomic_t		totalconns;	/* total connections */
+	atomic_t		activeconns;	/* active connections */
+	atomic_t		persistconns;	/* persistent connections */
+
 	refcount_t		refcnt;		/* reference counter */
 	struct ip_vs_stats      stats;          /* statistics */
 	unsigned long		idle_start;	/* start time, jiffies */
-
-	/* connection counters and thresholds */
-	atomic_t		activeconns;	/* active connections */
-	atomic_t		totalconns;	/* total connections */
-	atomic_t		persistconns;	/* persistent connections */
-	__u32			u_threshold;	/* upper threshold */
-	__u32			l_threshold;	/* lower threshold */
-	__u32			l_threshold_val;/* used lower threshold */
 
 	/* for destination cache */
 	spinlock_t		dst_lock;	/* lock of dst_cache */
@@ -1013,7 +1021,9 @@ struct ip_vs_dest {
 
 	struct rcu_head		rcu_head;
 	struct list_head	t_list;		/* in dest_trash */
-	unsigned int		in_rs_table:1;	/* we are in rs_table */
+	unsigned long		rcu_state;	/* GP cookie on unlink (trash or rehash) */
+	unsigned int		in_rs_table:1,	/* we are in rs_table */
+				need_gp:1;	/* Need GP on rehash */
 };
 
 /* The scheduler object */
@@ -1677,7 +1687,6 @@ static inline bool __ip_vs_conn_get(struct ip_vs_conn *cp)
 /* put back the conn without restarting its timer */
 static inline void __ip_vs_conn_put(struct ip_vs_conn *cp)
 {
-	smp_mb__before_atomic();
 	refcount_dec(&cp->refcnt);
 }
 void ip_vs_conn_put(struct ip_vs_conn *cp);
@@ -1915,7 +1924,13 @@ static inline void ip_vs_dest_put_and_free(struct ip_vs_dest *dest)
 		kfree(dest);
 }
 
-void ip_vs_dest_update_overload(struct ip_vs_dest *dest, int mode);
+void ip_vs_dest_update_overload(struct ip_vs_dest *dest);
+
+/* Check if dest is in overloaded state */
+static inline bool ip_vs_dest_is_overloaded(const struct ip_vs_dest *dest)
+{
+	return READ_ONCE(dest->l_threshold_val);
+}
 
 /* IPVS sync daemon data and function prototypes
  * (from ip_vs_sync.c)

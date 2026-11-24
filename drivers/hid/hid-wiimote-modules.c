@@ -30,6 +30,7 @@
  * input devices.
  */
 
+#include <linux/cleanup.h>
 #include <linux/device.h>
 #include <linux/hid.h>
 #include <linux/input.h>
@@ -117,7 +118,7 @@ static const struct wiimod_ops wiimod_keys = {
  */
 
 /* used by wiimod_rumble and wiipro_rumble */
-static void wiimod_rumble_worker(struct work_struct *work)
+void wiimod_rumble_worker(struct work_struct *work)
 {
 	struct wiimote_data *wdata = container_of(work, struct wiimote_data,
 						  rumble_worker);
@@ -155,8 +156,6 @@ static int wiimod_rumble_play(struct input_dev *dev, void *data,
 static int wiimod_rumble_probe(const struct wiimod_ops *ops,
 			       struct wiimote_data *wdata)
 {
-	INIT_WORK(&wdata->rumble_worker, wiimod_rumble_worker);
-
 	set_bit(FF_RUMBLE, wdata->input->ffbit);
 	if (input_ff_create_memless(wdata->input, NULL, wiimod_rumble_play))
 		return -ENOMEM;
@@ -338,10 +337,9 @@ static void wiimod_led_set(struct led_classdev *led_dev,
 static int wiimod_led_probe(const struct wiimod_ops *ops,
 			    struct wiimote_data *wdata)
 {
+	struct led_classdev *led __free(kfree) = NULL;
 	struct device *dev = &wdata->hdev->dev;
 	size_t namesz = strlen(dev_name(dev)) + 9;
-	struct led_classdev *led;
-	unsigned long flags;
 	char *name;
 	int ret;
 
@@ -359,22 +357,14 @@ static int wiimod_led_probe(const struct wiimod_ops *ops,
 
 	wdata->leds[ops->arg] = led;
 	ret = led_classdev_register(dev, led);
-	if (ret)
-		goto err_free;
-
-	/* enable LED1 to stop initial LED-blinking */
-	if (ops->arg == 0) {
-		spin_lock_irqsave(&wdata->state.lock, flags);
-		wiiproto_req_leds(wdata, WIIPROTO_FLAG_LED1);
-		spin_unlock_irqrestore(&wdata->state.lock, flags);
+	if (ret) {
+		wdata->leds[ops->arg] = NULL;
+		return ret;
 	}
 
-	return 0;
+	retain_and_null_ptr(led);
 
-err_free:
-	wdata->leds[ops->arg] = NULL;
-	kfree(led);
-	return ret;
+	return 0;
 }
 
 static void wiimod_led_remove(const struct wiimod_ops *ops,
@@ -1865,7 +1855,6 @@ static int wiimod_pro_probe(const struct wiimod_ops *ops,
 	int ret, i;
 	unsigned long flags;
 
-	INIT_WORK(&wdata->rumble_worker, wiimod_rumble_worker);
 	wdata->state.calib_pro_sticks[0] = 0;
 	wdata->state.calib_pro_sticks[1] = 0;
 	wdata->state.calib_pro_sticks[2] = 0;

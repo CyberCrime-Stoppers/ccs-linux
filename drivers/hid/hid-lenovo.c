@@ -476,6 +476,16 @@ static int lenovo_input_mapping_x1_tab_kbd(struct hid_device *hdev,
 	return 0;
 }
 
+static int lenovo_input_mapping_yoga7x_g11_kbd(struct hid_device *hdev,
+		struct hid_input *hi, struct hid_field *field,
+		struct hid_usage *usage, unsigned long **bit, int *max)
+{
+	if (field->application == HID_GD_WIRELESS_RADIO_CTLS)
+		return -1;
+
+	return 0;
+}
+
 static int lenovo_input_mapping(struct hid_device *hdev,
 		struct hid_input *hi, struct hid_field *field,
 		struct hid_usage *usage, unsigned long **bit, int *max)
@@ -510,6 +520,8 @@ static int lenovo_input_mapping(struct hid_device *hdev,
 	case USB_DEVICE_ID_LENOVO_X1_TAB2:
 	case USB_DEVICE_ID_LENOVO_X1_TAB3:
 		return lenovo_input_mapping_x1_tab_kbd(hdev, hi, field, usage, bit, max);
+	case I2C_DEVICE_ID_ITE_LENOVO_YOGA_SLIM_7X_G11_KEYBOARD:
+		return lenovo_input_mapping_yoga7x_g11_kbd(hdev, hi, field, usage, bit, max);
 	default:
 		return 0;
 	}
@@ -799,6 +811,22 @@ static int lenovo_raw_event(struct hid_device *hdev,
 		      hdev->product == USB_DEVICE_ID_LENOVO_X13_TAB) &&
 		      size >= 4 && report->id == 0x03))
 		return lenovo_raw_event_TP_X12_tab(hdev, get_unaligned_le32(data));
+
+	/*
+	 * Lenovo ThinkPad T14s gen6/7 snapdragon version filter out spurious
+	 * F23 events when Fn key is pressed. F23 cannot be unmapped because of
+	 * the copilot key sending left-meta + left-shift + F23. Filter report 8
+	 * (keyboard) scancode 0x72 (F23) when the modifier byte is not 0x0a.
+	 */
+	if (unlikely(hdev->product == I2C_DEVICE_ID_ELAN_LENOVO_T14S_KEYBOARD &&
+		     size == 9 && data[0] == 8 && data[1] != 0x0a)) {
+		for (int i = 3; i < 9; i++)
+			if (data[i] == 0x72) {
+				memmove(&data[i], &data[i + 1], 8 - i);
+				data[8] = 0;
+				break;
+			}
+	}
 
 	return 0;
 }
@@ -1245,9 +1273,7 @@ static int lenovo_probe_tpkbd(struct hid_device *hdev)
 	if (ret)
 		hid_warn(hdev, "Could not create sysfs group: %d\n", ret);
 
-	data_pointer = devm_kzalloc(&hdev->dev,
-				    sizeof(struct lenovo_drvdata),
-				    GFP_KERNEL);
+	data_pointer = devm_kzalloc_obj(&hdev->dev, struct lenovo_drvdata);
 	if (data_pointer == NULL) {
 		hid_err(hdev, "Could not allocate memory for driver data\n");
 		ret = -ENOMEM;
@@ -1285,9 +1311,7 @@ static int lenovo_probe_cptkbd(struct hid_device *hdev)
 		return 0;
 	}
 
-	cptkbd_data = devm_kzalloc(&hdev->dev,
-					sizeof(*cptkbd_data),
-					GFP_KERNEL);
+	cptkbd_data = devm_kzalloc_obj(&hdev->dev, *cptkbd_data);
 	if (cptkbd_data == NULL) {
 		hid_err(hdev, "can't alloc keyboard descriptor\n");
 		return -ENOMEM;
@@ -1339,7 +1363,7 @@ static int lenovo_probe_tp10ubkbd(struct hid_device *hdev)
 	if (!found)
 		return 0;
 
-	data = devm_kzalloc(&hdev->dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(&hdev->dev, *data);
 	if (!data)
 		return -ENOMEM;
 
@@ -1384,6 +1408,10 @@ static int lenovo_probe(struct hid_device *hdev,
 		const struct hid_device_id *id)
 {
 	int ret;
+
+	/* Make the T14s  keyboard trackpoint a separate input-device */
+	if (hdev->product == I2C_DEVICE_ID_ELAN_LENOVO_T14S_KEYBOARD)
+		hdev->quirks |= HID_QUIRK_INPUT_PER_APP;
 
 	ret = hid_parse(hdev);
 	if (ret) {
@@ -1550,6 +1578,7 @@ static const struct hid_device_id lenovo_devices[] = {
 	{ HID_USB_DEVICE(USB_VENDOR_ID_IBM, USB_DEVICE_ID_IBM_SCROLLPOINT_800DPI_OPTICAL_PRO) },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_LENOVO, USB_DEVICE_ID_LENOVO_SCROLLPOINT_OPTICAL) },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_LENOVO, USB_DEVICE_ID_LENOVO_TP10UBKBD) },
+	{ HID_I2C_DEVICE(USB_VENDOR_ID_ELAN, I2C_DEVICE_ID_ELAN_LENOVO_T14S_KEYBOARD) },
 	/*
 	 * Note bind to the HID_GROUP_GENERIC group, so that we only bind to the keyboard
 	 * part, while letting hid-multitouch.c handle the touchpad and trackpoint.
@@ -1568,6 +1597,8 @@ static const struct hid_device_id lenovo_devices[] = {
 		     USB_VENDOR_ID_LENOVO, USB_DEVICE_ID_LENOVO_X13_TAB) },
 	{ HID_DEVICE(BUS_I2C, HID_GROUP_GENERIC,
 		     USB_VENDOR_ID_ITE, I2C_DEVICE_ID_ITE_LENOVO_YOGA_SLIM_7X_KEYBOARD) },
+	{ HID_DEVICE(BUS_I2C, HID_GROUP_GENERIC,
+		     USB_VENDOR_ID_ITE, I2C_DEVICE_ID_ITE_LENOVO_YOGA_SLIM_7X_G11_KEYBOARD) },
 	{ }
 };
 

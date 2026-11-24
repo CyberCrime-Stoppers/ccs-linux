@@ -859,10 +859,10 @@ dwxgmac3_safety_feat_config(void __iomem *ioaddr, unsigned int asp,
 	value |= XGMAC_TCEIE; /* TSO Memory Correctable Error */
 	writel(value, ioaddr + XGMAC_DMA_ECC_INT_ENABLE);
 
-	/* 0x2: Without ECC or Parity Ports on External Application Interface
-	 * 0x4: Only ECC Protection for External Memory feature is selected
+	/* 0x4: Only ECC Protection for External Memory feature is
+	 * selected, without any on-chip parity protection
 	 */
-	if (asp == 0x2 || asp == 0x4)
+	if (asp == 0x4)
 		return 0;
 
 	/* 4. Enable Parity and Timeout for FSM */
@@ -1410,22 +1410,6 @@ static int dwxgmac2_config_l4_filter(struct mac_device_info *hw, u32 filter_no,
 	return 0;
 }
 
-static void dwxgmac2_set_arp_offload(struct mac_device_info *hw, bool en,
-				     u32 addr)
-{
-	void __iomem *ioaddr = hw->pcsr;
-	u32 value;
-
-	writel(addr, ioaddr + XGMAC_ARP_ADDR);
-
-	value = readl(ioaddr + XGMAC_RX_CONFIG);
-	if (en)
-		value |= XGMAC_CONFIG_ARPEN;
-	else
-		value &= ~XGMAC_CONFIG_ARPEN;
-	writel(value, ioaddr + XGMAC_RX_CONFIG);
-}
-
 const struct stmmac_ops dwxgmac210_ops = {
 	.core_init = dwxgmac2_core_init,
 	.irq_modify = dwxgmac2_irq_modify,
@@ -1464,7 +1448,6 @@ const struct stmmac_ops dwxgmac210_ops = {
 	.sarc_configure = dwxgmac2_sarc_configure,
 	.config_l3_filter = dwxgmac2_config_l3_filter,
 	.config_l4_filter = dwxgmac2_config_l4_filter,
-	.set_arp_offload = dwxgmac2_set_arp_offload,
 	.fpe_map_preemption_class = dwxgmac3_fpe_map_preemption_class,
 };
 
@@ -1519,7 +1502,6 @@ const struct stmmac_ops dwxlgmac2_ops = {
 	.sarc_configure = dwxgmac2_sarc_configure,
 	.config_l3_filter = dwxgmac2_config_l3_filter,
 	.config_l4_filter = dwxgmac2_config_l4_filter,
-	.set_arp_offload = dwxgmac2_set_arp_offload,
 	.fpe_map_preemption_class = dwxgmac3_fpe_map_preemption_class,
 };
 

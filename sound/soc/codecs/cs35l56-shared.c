@@ -34,23 +34,19 @@ static const struct reg_sequence cs35l56_asp_patch[] = {
 	{ CS35L56_ASP1_ENABLES1,		0x00000000 },
 	{ CS35L56_ASP1_CONTROL1,		0x00000028 },
 	{ CS35L56_ASP1_CONTROL2,		0x18180200 },
-	{ CS35L56_ASP1_CONTROL3,		0x00000002 },
+	{ CS35L56_ASP1_CONTROL3,		0x00000003 },
 	{ CS35L56_ASP1_FRAME_CONTROL1,		0x03020100 },
 	{ CS35L56_ASP1_FRAME_CONTROL5,		0x00020100 },
 	{ CS35L56_ASP1_DATA_CONTROL1,		0x00000018 },
 	{ CS35L56_ASP1_DATA_CONTROL5,		0x00000018 },
-	{ CS35L56_ASP1TX1_INPUT,		0x00000000 },
-	{ CS35L56_ASP1TX2_INPUT,		0x00000000 },
-	{ CS35L56_ASP1TX3_INPUT,		0x00000000 },
-	{ CS35L56_ASP1TX4_INPUT,		0x00000000 },
 };
 
-int cs35l56_set_asp_patch(struct cs35l56_base *cs35l56_base)
+int cs35l56_set_asp_defaults(struct cs35l56_base *cs35l56_base)
 {
-	return regmap_register_patch(cs35l56_base->regmap, cs35l56_asp_patch,
-				     ARRAY_SIZE(cs35l56_asp_patch));
+	return regmap_multi_reg_write(cs35l56_base->regmap, cs35l56_asp_patch,
+				      ARRAY_SIZE(cs35l56_asp_patch));
 }
-EXPORT_SYMBOL_NS_GPL(cs35l56_set_asp_patch, "SND_SOC_CS35L56_SHARED");
+EXPORT_SYMBOL_NS_GPL(cs35l56_set_asp_defaults, "SND_SOC_CS35L56_SHARED");
 
 static const struct reg_sequence cs35l56_patch[] = {
 	/*
@@ -109,18 +105,6 @@ int cs35l56_set_patch(struct cs35l56_base *cs35l56_base)
 EXPORT_SYMBOL_NS_GPL(cs35l56_set_patch, "SND_SOC_CS35L56_SHARED");
 
 static const struct reg_default cs35l56_reg_defaults[] = {
-	{ CS35L56_ASP1_ENABLES1,		0x00000000 },
-	{ CS35L56_ASP1_CONTROL1,		0x00000028 },
-	{ CS35L56_ASP1_CONTROL2,		0x18180200 },
-	{ CS35L56_ASP1_CONTROL3,		0x00000002 },
-	{ CS35L56_ASP1_FRAME_CONTROL1,		0x03020100 },
-	{ CS35L56_ASP1_FRAME_CONTROL5,		0x00020100 },
-	{ CS35L56_ASP1_DATA_CONTROL1,		0x00000018 },
-	{ CS35L56_ASP1_DATA_CONTROL5,		0x00000018 },
-	{ CS35L56_ASP1TX1_INPUT,		0x00000000 },
-	{ CS35L56_ASP1TX2_INPUT,		0x00000000 },
-	{ CS35L56_ASP1TX3_INPUT,		0x00000000 },
-	{ CS35L56_ASP1TX4_INPUT,		0x00000000 },
 	{ CS35L56_SWIRE_DP3_CH1_INPUT,		0x00000018 },
 	{ CS35L56_SWIRE_DP3_CH2_INPUT,		0x00000019 },
 	{ CS35L56_SWIRE_DP3_CH3_INPUT,		0x00000029 },
@@ -137,18 +121,6 @@ static const struct reg_default cs35l56_reg_defaults[] = {
 };
 
 static const struct reg_default cs35l63_reg_defaults[] = {
-	{ CS35L56_ASP1_ENABLES1,		0x00000000 },
-	{ CS35L56_ASP1_CONTROL1,		0x00000028 },
-	{ CS35L56_ASP1_CONTROL2,		0x18180200 },
-	{ CS35L56_ASP1_CONTROL3,		0x00000002 },
-	{ CS35L56_ASP1_FRAME_CONTROL1,		0x03020100 },
-	{ CS35L56_ASP1_FRAME_CONTROL5,		0x00020100 },
-	{ CS35L56_ASP1_DATA_CONTROL1,		0x00000018 },
-	{ CS35L56_ASP1_DATA_CONTROL5,		0x00000018 },
-	{ CS35L56_ASP1TX1_INPUT,		0x00000000 },
-	{ CS35L56_ASP1TX2_INPUT,		0x00000000 },
-	{ CS35L56_ASP1TX3_INPUT,		0x00000000 },
-	{ CS35L56_ASP1TX4_INPUT,		0x00000000 },
 	{ CS35L56_SWIRE_DP3_CH1_INPUT,		0x00000018 },
 	{ CS35L56_SWIRE_DP3_CH2_INPUT,		0x00000019 },
 	{ CS35L56_SWIRE_DP3_CH3_INPUT,		0x00000029 },
@@ -1378,6 +1350,44 @@ void cs35l56_warn_if_firmware_missing(struct cs35l56_base *cs35l56_base)
 	dev_warn(cs35l56_base->dev, "FIRMWARE_MISSING\n");
 }
 EXPORT_SYMBOL_NS_GPL(cs35l56_warn_if_firmware_missing, "SND_SOC_CS35L56_SHARED");
+
+bool cs35l56_needs_wait_for_firmware_timer_expiry(struct cs35l56_base *cs35l56_base)
+{
+	unsigned int fw_ver;
+	bool prot_sts;
+	int ret;
+
+	switch (cs35l56_base->type) {
+	case 0x54:
+	case 0x56:
+	case 0x57:
+		switch (cs35l56_base->rev) {
+		case 0xb0:
+			ret = cs35l56_read_prot_status(cs35l56_base, &prot_sts, &fw_ver);
+			if (ret)
+				return true;
+
+			if ((fw_ver & CS35L56_FW_MAIN_VERSION_MASK) < 0x30d07)
+				return true;
+
+			return false;
+		case 0xb2:
+			ret = cs35l56_read_prot_status(cs35l56_base, &prot_sts, &fw_ver);
+			if (ret)
+				return true;
+
+			if ((fw_ver & CS35L56_FW_MAIN_VERSION_MASK) < 0x40710)
+				return true;
+
+			return false;
+		default:
+			return false;
+		}
+	default:
+		return false;
+	}
+}
+EXPORT_SYMBOL_NS_GPL(cs35l56_needs_wait_for_firmware_timer_expiry, "SND_SOC_CS35L56_SHARED");
 
 void cs35l56_log_tuning(struct cs35l56_base *cs35l56_base, struct cs_dsp *cs_dsp)
 {

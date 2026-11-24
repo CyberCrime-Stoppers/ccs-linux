@@ -57,13 +57,6 @@ int renameat2(int olddirfd, const char *oldpath, int newdirfd,
 }
 #endif
 
-#ifndef open_tree
-int open_tree(int dfd, const char *filename, unsigned int flags)
-{
-	return syscall(__NR_open_tree, dfd, filename, flags);
-}
-#endif
-
 static int sys_execveat(int dirfd, const char *pathname, char *const argv[],
 			char *const envp[], int flags)
 {
@@ -2620,6 +2613,60 @@ TEST_F_FORK(layout1, refer_denied_by_default4)
 }
 
 /*
+ * Regression test for layered domains: The two enforced Landlock layers both do
+ * not restrict the tested "refer" operations on their own, so they should also
+ * not restrict them when they are layered, regardless of the layer order.
+ */
+static void test_layering_does_not_break_refer(
+	struct __test_metadata *const _metadata,
+	const struct landlock_ruleset_attr *const non_fs_attr,
+	const bool non_fs_first)
+{
+	ASSERT_EQ(0, unlink(file1_s1d2));
+
+	if (non_fs_first)
+		drop_access_rights(_metadata, non_fs_attr);
+
+	enforce_fs(_metadata, LANDLOCK_ACCESS_FS_REFER, layer_dir_s1d1_refer);
+
+	if (!non_fs_first)
+		drop_access_rights(_metadata, non_fs_attr);
+
+	EXPECT_EQ(0, test_rename(file1_s1d1, file1_s1d2));
+	EXPECT_EQ(0, test_rename(file1_s1d2, file1_s1d1));
+	EXPECT_EQ(0, test_exchange(file2_s1d1, file2_s1d2));
+	EXPECT_EQ(0, test_exchange(file2_s1d2, file2_s1d1));
+}
+
+static const struct landlock_ruleset_attr net_attr = {
+	.handled_access_net = LANDLOCK_ACCESS_NET_BIND_TCP,
+};
+
+static const struct landlock_ruleset_attr scoped_attr = {
+	.scoped = LANDLOCK_SCOPE_SIGNAL,
+};
+
+TEST_F_FORK(layout1, layering_fs_then_net_does_not_break_refer)
+{
+	test_layering_does_not_break_refer(_metadata, &net_attr, false);
+}
+
+TEST_F_FORK(layout1, layering_net_then_fs_does_not_break_refer)
+{
+	test_layering_does_not_break_refer(_metadata, &net_attr, true);
+}
+
+TEST_F_FORK(layout1, layering_fs_then_scoped_does_not_break_refer)
+{
+	test_layering_does_not_break_refer(_metadata, &scoped_attr, false);
+}
+
+TEST_F_FORK(layout1, layering_scoped_then_fs_does_not_break_refer)
+{
+	test_layering_does_not_break_refer(_metadata, &scoped_attr, true);
+}
+
+/*
  * Tests walking through a denied root mount.
  */
 TEST_F_FORK(layout1, refer_mount_root_deny)
@@ -2628,9 +2675,9 @@ TEST_F_FORK(layout1, refer_mount_root_deny)
 
 	/* Creates a mount object from a non-mount point. */
 	set_cap(_metadata, CAP_SYS_ADMIN);
-	root_fd =
-		open_tree(AT_FDCWD, dir_s1d1,
-			  AT_EMPTY_PATH | OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC);
+	root_fd = sys_open_tree(AT_FDCWD, dir_s1d1,
+				AT_EMPTY_PATH | OPEN_TREE_CLONE |
+					OPEN_TREE_CLOEXEC);
 	clear_cap(_metadata, CAP_SYS_ADMIN);
 	ASSERT_LE(0, root_fd);
 
@@ -2987,8 +3034,8 @@ TEST_F_FORK(layout1, reparent_exdev_layers_rename1)
 
 	/*
 	 * Moving the file2_s1d3 file below dir_s2d3 is denied because the
-	 * second layer does not handle REFER, which is always denied by
-	 * default.
+	 * second layer does not handle REFER, which is always denied as soon as
+	 * any other filesystem access right is handled.
 	 */
 	ASSERT_EQ(-1, rename(file2_s1d3, file1_s2d3));
 	ASSERT_EQ(EXDEV, errno);
@@ -3026,7 +3073,8 @@ TEST_F_FORK(layout1, reparent_exdev_layers_rename2)
 	ASSERT_EQ(EXDEV, errno);
 	/*
 	 * Modifying the layout is now denied because the second layer does not
-	 * handle REFER, which is always denied by default.
+	 * handle REFER, which is always denied as soon as any other filesystem
+	 * access right is handled.
 	 */
 	ASSERT_EQ(-1, rename(file2_s1d2, file1_s2d3));
 	ASSERT_EQ(EXDEV, errno);
@@ -4146,6 +4194,9 @@ TEST_F_FORK(layout1, o_path_ftruncate_and_ioctl)
 	ASSERT_EQ(0, close(fd));
 }
 
+/* Arbitrary command with nonzero bits in both 16-bit halves. */
+static const unsigned int unknown_ioctl_cmd = 0xc00ffeee;
+
 /*
  * ioctl_error - generically call the given ioctl with a pointer to a
  * sufficiently large zeroed-out memory region.
@@ -4249,7 +4300,7 @@ TEST_F_FORK(layout1, blanket_permitted_ioctls)
 	EXPECT_EQ(EACCES, ioctl_error(_metadata, fd, FS_IOC_ZERO_RANGE));
 
 	/* Default case is also blocked. */
-	EXPECT_EQ(EACCES, ioctl_error(_metadata, fd, 0xc00ffeee));
+	EXPECT_EQ(EACCES, ioctl_error(_metadata, fd, unknown_ioctl_cmd));
 
 	ASSERT_EQ(0, close(fd));
 }
@@ -7943,6 +7994,7 @@ TEST_F(audit_layout1, truncate)
 	EXPECT_EQ(1, records.domain);
 }
 
+/* Checks that audit records preserve every ioctl command bit. */
 TEST_F(audit_layout1, ioctl_dev)
 {
 	struct audit_records records;
@@ -7952,10 +8004,10 @@ TEST_F(audit_layout1, ioctl_dev)
 
 	fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
 	ASSERT_LE(0, fd);
-	EXPECT_EQ(EACCES, ioctl_error(_metadata, fd, FIONREAD));
+	EXPECT_EQ(EACCES, ioctl_error(_metadata, fd, unknown_ioctl_cmd));
 	EXPECT_EQ(0, matches_log_fs_extra(_metadata, self->audit_fd,
 					  "fs\\.ioctl_dev", "/dev/null",
-					  " ioctlcmd=0x541b"));
+					  " ioctlcmd=0xc00ffeee"));
 
 	EXPECT_EQ(0, audit_count_records(self->audit_fd, &records));
 	EXPECT_EQ(0, records.access);
@@ -10493,9 +10545,9 @@ FIXTURE_TEARDOWN_PARENT(trace_layout1)
 }
 
 /*
- * Verifies that check_rule_fs events include correct field values: domain, dev,
- * ino, access_request, and grants.  All values are verified against stat() of
- * the rule path on a deterministic tmpfs layout.
+ * Verifies that check_rule_inode events include correct field values: domain,
+ * dev, ino, access_request, and grants.  All values are verified against stat()
+ * of the rule path on a deterministic tmpfs layout.
  */
 TEST_F(trace_layout1, check_rule_fs_fields)
 {
@@ -10529,7 +10581,7 @@ TEST_F(trace_layout1, check_rule_fs_fields)
 	EXPECT_EQ(1,
 		  tracefs_count_matches(buf, REGEX_CHECK_RULE_FS(TRACE_TASK)))
 	{
-		TH_LOG("Expected 1 check_rule_fs event\n%s", buf);
+		TH_LOG("Expected 1 check_rule_inode event\n%s", buf);
 	}
 
 	ASSERT_EQ(0, tracefs_extract_field(buf, REGEX_CHECK_RULE_FS(TRACE_TASK),
@@ -10570,8 +10622,8 @@ TEST_F(trace_layout1, check_rule_fs_fields)
 }
 
 /*
- * Verifies check_rule_fs behavior with multiple rules.  With rules at s1d1 and
- * s1d2 (a child of s1d1), accessing s1d2 produces only 1 event because the
+ * Verifies check_rule_inode behavior with multiple rules.  With rules at s1d1
+ * and s1d2 (a child of s1d1), accessing s1d2 produces only 1 event because the
  * pathwalk short-circuits after the first rule fully unmasks the single layer.
  */
 TEST_F(trace_layout1, check_rule_fs_multiple_rules)
@@ -10643,14 +10695,14 @@ TEST_F(trace_layout1, check_rule_fs_multiple_rules)
 	ASSERT_NE(NULL, buf);
 
 	/*
-	 * Only 1 check_rule_fs event: the rule on dir_s1d2 fully unmasked the
-	 * single layer, so the pathwalk short-circuits before reaching the
+	 * Only one check_rule_inode event: the rule on dir_s1d2 fully unmasks
+	 * the single layer, so the pathwalk short-circuits before reaching the
 	 * dir_s1d1 rule.
 	 */
 	count = tracefs_count_matches(buf, REGEX_CHECK_RULE_FS(TRACE_TASK));
 	EXPECT_EQ(1, count)
 	{
-		TH_LOG("Expected 1 check_rule_fs event, got %d\n%s", count,
+		TH_LOG("Expected 1 check_rule_inode event, got %d\n%s", count,
 		       buf);
 	}
 
@@ -10777,7 +10829,7 @@ TEST_F(trace_layout1, check_rule_fs_optional_access)
 	count = tracefs_count_matches(buf, REGEX_CHECK_RULE_FS(TRACE_TASK));
 	EXPECT_EQ(1, count)
 	{
-		TH_LOG("Expected 1 check_rule_fs event, got %d\n%s", count,
+		TH_LOG("Expected 1 check_rule_inode event, got %d\n%s", count,
 		       buf);
 	}
 
@@ -10796,7 +10848,7 @@ TEST_F(trace_layout1, check_rule_fs_optional_access)
 }
 
 /*
- * Verifies that check_rule_fs fires for a rule that matches the inode even when
+ * Verifies that check_rule_inode fires for a rule matching the inode even when
  * it grants none of the requested rights, so the grants set is empty.  Landlock
  * cannot know a rule ignores the request before reading it, so the event is
  * still emitted (grants={}), which lets a tracer see that the rule matched.
@@ -10884,7 +10936,7 @@ TEST_F(trace_layout1, check_rule_fs_empty_grant)
 	count = tracefs_count_matches(buf, REGEX_CHECK_RULE_FS(TRACE_TASK));
 	EXPECT_EQ(2, count)
 	{
-		TH_LOG("Expected 2 check_rule_fs events, got %d\n%s", count,
+		TH_LOG("Expected 2 check_rule_inode events, got %d\n%s", count,
 		       buf);
 	}
 
@@ -10894,7 +10946,7 @@ TEST_F(trace_layout1, check_rule_fs_empty_grant)
 		tracefs_count_matches(
 			buf,
 			TRACE_PREFIX(
-				TRACE_TASK) "landlock_check_rule_fs: domain=[0-9a-f]\\+ "
+				TRACE_TASK) "landlock_check_rule_inode: domain=[0-9a-f]\\+ "
 					    "access_request=read_dir "
 					    "dev=[0-9]\\+:[0-9]\\+ ino=[0-9]\\+ "
 					    "grants={}$"))
@@ -10908,7 +10960,7 @@ TEST_F(trace_layout1, check_rule_fs_empty_grant)
 		tracefs_count_matches(
 			buf,
 			TRACE_PREFIX(
-				TRACE_TASK) "landlock_check_rule_fs: domain=[0-9a-f]\\+ "
+				TRACE_TASK) "landlock_check_rule_inode: domain=[0-9a-f]\\+ "
 					    "access_request=read_dir "
 					    "dev=[0-9]\\+:[0-9]\\+ ino=[0-9]\\+ "
 					    "grants={read_dir}$"))

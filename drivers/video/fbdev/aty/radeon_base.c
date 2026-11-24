@@ -779,7 +779,7 @@ static void radeon_get_pllinfo(struct radeonfb_info *rinfo)
 #endif /* CONFIG_PPC || CONFIG_SPARC */
 
 	/*
-	 * Check out if we have an X86 which gave us some PLL informations
+	 * Check out if we have an X86 which gave us some PLL information
 	 * and if yes, retrieve them
 	 */
 	if (!force_measure_pll && rinfo->bios_seg) {
@@ -835,6 +835,9 @@ static int radeonfb_check_var (struct fb_var_screeninfo *var, struct fb_info *in
         struct fb_var_screeninfo v;
         int nom, den;
 	unsigned int pitch;
+
+	if (!var->pixclock)
+		return -EINVAL;
 
 	if (radeon_match_mode(rinfo, &v, var))
 		return -EINVAL;
@@ -2407,7 +2410,7 @@ static int radeonfb_pci_register(struct pci_dev *pdev,
 	if (rinfo->bios_seg == NULL && rinfo->is_mobility)
 		radeon_map_ROM(rinfo, pdev);
 
-	/* Get informations about the board's PLL */
+	/* Get information about the board's PLL */
 	radeon_get_pllinfo(rinfo);
 
 #ifdef CONFIG_FB_RADEON_I2C

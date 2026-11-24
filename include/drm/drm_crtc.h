@@ -424,18 +424,6 @@ struct drm_crtc_state {
  */
 struct drm_crtc_funcs {
 	/**
-	 * @reset:
-	 *
-	 * Reset CRTC hardware and software state to off. This function isn't
-	 * called by the core directly, only through drm_mode_config_reset().
-	 * It's not a helper hook only for historical reasons.
-	 *
-	 * Atomic drivers can use drm_atomic_helper_crtc_reset() to reset
-	 * atomic state using this hook.
-	 */
-	void (*reset)(struct drm_crtc *crtc);
-
-	/**
 	 * @cursor_set:
 	 *
 	 * Update the cursor image. The cursor position is relative to the CRTC
@@ -919,6 +907,15 @@ struct drm_crtc_funcs {
 	 * new drivers as the replacement of &drm_driver.disable_vblank hook.
 	 */
 	void (*disable_vblank)(struct drm_crtc *crtc);
+
+	/**
+	 * @sync_vblank:
+	 *
+	 * Synchronizes vblank hardware and software state after switching off
+	 * vblanks for the given CRTC. Called without holding vblank locks. Allows
+	 * the driver to clean up vblank state outside of critical sections.
+	 */
+	void (*sync_vblank)(struct drm_crtc *crtc);
 
 	/**
 	 * @get_vblank_timestamp:

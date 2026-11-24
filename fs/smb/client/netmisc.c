@@ -133,8 +133,7 @@ cifs_NTtimeToUnix(__le64 ntutc)
 	if (t < 0) {
 		abs_t = -t;
 		ts.tv_nsec = (time64_t)(do_div(abs_t, 10000000) * 100);
-		ts.tv_nsec = -ts.tv_nsec;
-		ts.tv_sec = -abs_t;
+		set_normalized_timespec64(&ts, -abs_t, -ts.tv_nsec);
 	} else {
 		abs_t = t;
 		ts.tv_nsec = (time64_t)do_div(abs_t, 10000000) * 100;
@@ -204,9 +203,6 @@ struct timespec64 cnvrtDosUnixTm(__le16 le_date, __le16 le_time, int offset)
 	sec += 24 * 60 * 60 * days;
 
 	ts.tv_sec = sec + offset;
-
-	/* cifs_dbg(FYI, "sec after cnvrt dos to unix time %d\n",sec); */
-
 	ts.tv_nsec = 0;
 	return ts;
 }

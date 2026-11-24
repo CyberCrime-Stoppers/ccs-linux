@@ -715,7 +715,7 @@ static struct vm_area_struct *get_uprobe_trampoline(struct mm_struct *mm, unsign
 
 	*new_mapping = true;
 	return _install_special_mapping(mm, vaddr, PAGE_SIZE,
-				VM_READ|VM_EXEC|VM_MAYEXEC|VM_MAYREAD|VM_IO,
+				VM_READ|VM_EXEC|VM_MAYEXEC|VM_MAYREAD|VM_MIXEDMAP,
 				&tramp_mapping);
 }
 
@@ -1886,6 +1886,21 @@ bool arch_uretprobe_is_alive(struct return_instance *ret, enum rp_check ctx,
 		return regs->sp < ret->stack;
 	else
 		return regs->sp <= ret->stack;
+}
+
+bool arch_uprobe_regs_writable(int off, int size)
+{
+	int end = off + size;
+
+	/* The 32-bit pt_regs has segments in front of orig_ax. */
+	if (!IS_ENABLED(CONFIG_X86_64))
+		return false;
+	/* From r15 to di. Not orig_ax, cs, flags, ss. */
+	if (end <= offsetof(struct pt_regs, orig_ax))
+		return true;
+	if (off >= offsetof(struct pt_regs, ip) && end <= offsetofend(struct pt_regs, ip))
+		return true;
+	return off >= offsetof(struct pt_regs, sp) && end <= offsetofend(struct pt_regs, sp);
 }
 
 /*

@@ -7,6 +7,7 @@
 
 #include <kunit/test.h>
 #include <linux/dma-buf.h>
+#include <linux/dynamic_debug.h>
 #include <linux/pci-p2pdma.h>
 
 #include <drm/drm_device.h>
@@ -22,13 +23,29 @@
 
 MODULE_IMPORT_NS("DMA_BUF");
 
+#if defined(CONFIG_DYNAMIC_DEBUG) || \
+	(defined(CONFIG_DYNAMIC_DEBUG_CORE) && defined(DYNAMIC_DEBUG_MODULE))
+static void xe_ddebug_flip_bool(const struct _ddebug *desc, bool *flag)
+{
+	*flag = true;
+}
+
+#define xe_dma_buf_p2p_debug_flip(flag) \
+	_dynamic_func_call("xe dma-buf p2p debug", xe_ddebug_flip_bool, flag)
+#else
+#define xe_dma_buf_p2p_debug_flip(flag) do { } while (0)
+#endif
+
 static int xe_dma_buf_attach(struct dma_buf *dmabuf,
 			     struct dma_buf_attachment *attach)
 {
 	struct drm_gem_object *obj = attach->dmabuf->priv;
+	bool verbose_p2p_dist = drm_debug_enabled(DRM_UT_DRIVER);
+
+	xe_dma_buf_p2p_debug_flip(&verbose_p2p_dist);
 
 	if (attach->peer2peer &&
-	    pci_p2pdma_distance(to_pci_dev(obj->dev->dev), attach->dev, false) < 0)
+	    pci_p2pdma_distance(to_pci_dev(obj->dev->dev), attach->dev, verbose_p2p_dist) < 0)
 		attach->peer2peer = false;
 
 	if (!attach->peer2peer && !xe_bo_can_migrate(gem_to_xe_bo(obj), XE_PL_TT))
@@ -103,6 +120,9 @@ static struct sg_table *xe_dma_buf_map(struct dma_buf_attachment *attach,
 	struct drm_exec *exec = XE_VALIDATION_UNSUPPORTED;
 	struct sg_table *sgt;
 	int r = 0;
+
+	if (xe_bo_is_purged(bo))
+		return ERR_PTR(-ENOENT);
 
 	if (!attach->peer2peer && !xe_bo_can_migrate(bo, XE_PL_TT))
 		return ERR_PTR(-EOPNOTSUPP);
@@ -222,60 +242,62 @@ static const struct dma_buf_ops xe_dmabuf_ops = {
 struct dma_buf *xe_gem_prime_export(struct drm_gem_object *obj, int flags)
 {
 	struct xe_bo *bo = gem_to_xe_bo(obj);
+	struct xe_validation_ctx ctx;
+	struct drm_exec exec;
 	struct dma_buf *buf;
-	struct ttm_operation_ctx ctx = {
-		.interruptible = true,
-		.no_wait_gpu = true,
-		/* We opt to avoid OOM on system pages allocations */
-		.gfp_retry_mayfail = true,
-		.allow_res_evict = false,
-	};
-	int ret;
+	int ret = 0;
 
 	if (bo->vm)
 		return ERR_PTR(-EPERM);
 
-	/*
-	 * Reject exporting purgeable BOs. DONTNEED BOs can be purged
-	 * at any time, making the exported dma-buf unusable. Purged BOs
-	 * have no backing store and are permanently invalid.
-	 */
-	ret = xe_bo_lock(bo, true);
+	xe_validation_guard(&ctx, &xe_bo_device(bo)->val, &exec,
+			    (struct xe_val_flags) {.interruptible = true}, ret) {
+		ret = drm_exec_lock_obj(&exec, &bo->ttm.base);
+		drm_exec_retry_on_contention(&exec);
+		if (ret)
+			break;
+
+		/*
+		 * Reject exporting purgeable BOs. DONTNEED BOs can be purged
+		 * at any time, making the exported dma-buf unusable. Purged BOs
+		 * have no backing store and are permanently invalid.
+		 */
+		if (xe_bo_madv_is_dontneed(bo)) {
+			ret = -EBUSY;
+			break;
+		}
+
+		if (xe_bo_is_purged(bo)) {
+			ret = -EINVAL;
+			break;
+		}
+
+		/*
+		 * Make sure the BO is backed in its preferred placement so that
+		 * the exporter, rather than the importer, is charged for the
+		 * memory allocation.
+		 */
+		ret = xe_bo_validate(bo, NULL, false, &exec);
+		drm_exec_retry_on_contention(&exec);
+		xe_validation_retry_on_oom(&ctx, &ret);
+		if (ret)
+			break;
+
+		xe_bo_willneed_get_locked(bo);
+	}
 	if (ret)
 		return ERR_PTR(ret);
 
-	if (xe_bo_madv_is_dontneed(bo)) {
-		ret = -EBUSY;
-		goto out_unlock;
-	}
-
-	if (xe_bo_is_purged(bo)) {
-		ret = -EINVAL;
-		goto out_unlock;
-	}
-
-	xe_bo_willneed_get_locked(bo);
-	xe_bo_unlock(bo);
-
-	ret = ttm_bo_setup_export(&bo->ttm, &ctx);
-	if (ret)
-		goto out_put;
-
 	buf = drm_gem_prime_export(obj, flags);
 	if (IS_ERR(buf)) {
-		ret = PTR_ERR(buf);
-		goto out_put;
+		xe_bo_lock(bo, false);
+		xe_bo_willneed_put_locked(bo);
+		xe_bo_unlock(bo);
+		return buf;
 	}
 
 	buf->ops = &xe_dmabuf_ops;
 	return buf;
-
-out_put:
-	xe_bo_lock(bo, false);
-	xe_bo_willneed_put_locked(bo);
-out_unlock:
-	xe_bo_unlock(bo);
-	return ERR_PTR(ret);
 }
 
 static struct drm_gem_object *

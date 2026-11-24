@@ -222,48 +222,6 @@ static void anon_pipe_buf_release(struct pipe_inode_info *pipe,
 	anon_pipe_put_page(pipe, page);
 }
 
-static bool anon_pipe_buf_try_steal(struct pipe_inode_info *pipe,
-		struct pipe_buffer *buf)
-{
-	struct page *page = buf->page;
-
-	if (page_count(page) != 1)
-		return false;
-	memcg_kmem_uncharge_page(page, 0);
-	__SetPageLocked(page);
-	return true;
-}
-
-/**
- * generic_pipe_buf_try_steal - attempt to take ownership of a &pipe_buffer
- * @pipe:	the pipe that the buffer belongs to
- * @buf:	the buffer to attempt to steal
- *
- * Description:
- *	This function attempts to steal the &struct page attached to
- *	@buf. If successful, this function returns 0 and returns with
- *	the page locked. The caller may then reuse the page for whatever
- *	he wishes; the typical use is insertion into a different file
- *	page cache.
- */
-bool generic_pipe_buf_try_steal(struct pipe_inode_info *pipe,
-		struct pipe_buffer *buf)
-{
-	struct page *page = buf->page;
-
-	/*
-	 * A reference of one is golden, that means that the owner of this
-	 * page is the only one holding a reference to it. lock the page
-	 * and return OK.
-	 */
-	if (page_count(page) == 1) {
-		lock_page(page);
-		return true;
-	}
-	return false;
-}
-EXPORT_SYMBOL(generic_pipe_buf_try_steal);
-
 /**
  * generic_pipe_buf_get - get a reference to a &struct pipe_buffer
  * @pipe:	the pipe that the buffer belongs to
@@ -297,7 +255,6 @@ EXPORT_SYMBOL(generic_pipe_buf_release);
 
 static const struct pipe_buf_operations anon_pipe_buf_ops = {
 	.release	= anon_pipe_buf_release,
-	.try_steal	= anon_pipe_buf_try_steal,
 	.get		= generic_pipe_buf_get,
 };
 
@@ -838,9 +795,11 @@ pipe_fasync(int fd, struct file *filp, int on)
 	if (filp->f_mode & FMODE_READ)
 		retval = fasync_helper(fd, filp, on, &pipe->fasync_readers);
 	if ((filp->f_mode & FMODE_WRITE) && retval >= 0) {
+		int read_ret = retval;
+
 		retval = fasync_helper(fd, filp, on, &pipe->fasync_writers);
-		if (retval < 0 && (filp->f_mode & FMODE_READ))
-			/* this can happen only if on == T */
+		/* Undo only a reader entry added by this call. */
+		if (retval < 0 && read_ret > 0)
 			fasync_helper(-1, filp, 0, &pipe->fasync_readers);
 	}
 	mutex_unlock(&pipe->mutex);
@@ -1433,7 +1392,7 @@ int pipe_resize_ring(struct pipe_inode_info *pipe, unsigned int nr_slots)
 	spin_unlock_irq(&pipe->rd_wait.lock);
 
 	/* This might have made more room for writers */
-	wake_up_interruptible(&pipe->wr_wait);
+	wake_up_interruptible_poll(&pipe->wr_wait, EPOLLOUT | EPOLLWRNORM);
 	return 0;
 }
 

@@ -387,8 +387,8 @@ static size_t limit_write(struct device *dev,
 	 * adapted for fixed point arithmetic and packed the same as
 	 * in limit_read()
 	 */
-	raw = ((u32)(temperature + 45000) * 24543) >> (16 + 7);
-	raw |= ((humidity * 42950) >> 16) & 0xfe00;
+	raw = min(((u64)(temperature + 45000) * 24543) >> (16 + 7), 0x1ff);
+	raw |= min(((u64)humidity * 42950) >> 16, 0xffff) & 0xfe00;
 
 	put_unaligned_be16(raw, position);
 	position += SHT3X_WORD_LEN;
@@ -543,7 +543,10 @@ static ssize_t heater_enable_store(struct device *dev,
 
 	mutex_unlock(&data->i2c_lock);
 
-	return ret;
+	if (ret != SHT3X_CMD_LENGTH)
+		return ret < 0 ? ret : -EIO;
+
+	return count;
 }
 
 static int update_interval_read(struct device *dev)
@@ -893,7 +896,7 @@ static int sht3x_probe(struct i2c_client *client)
 	if (ret != SHT3X_CMD_LENGTH)
 		return ret < 0 ? ret : -ENODEV;
 
-	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, *data);
 	if (!data)
 		return -ENOMEM;
 

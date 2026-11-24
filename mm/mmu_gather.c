@@ -179,10 +179,7 @@ static bool __tlb_remove_folio_pages_size(struct mmu_gather *tlb,
 #endif
 
 	batch = tlb->active;
-	/*
-	 * Add the page and check if we are full. If so
-	 * force a flush.
-	 */
+	/* Add the pages before deciding whether we need to flush. */
 	if (likely(nr_pages == 1)) {
 		batch->encoded_pages[batch->nr++] = encode_page(page, flags);
 	} else {
@@ -190,6 +187,11 @@ static bool __tlb_remove_folio_pages_size(struct mmu_gather *tlb,
 		batch->encoded_pages[batch->nr++] = encode_page(page, flags);
 		batch->encoded_pages[batch->nr++] = encode_nr_pages(nr_pages);
 	}
+	/* Flush pending references well before new references are refused. */
+	if (unlikely((unsigned int)folio_ref_count(page_folio(page)) >=
+		     FOLIO_REF_COUNT_FLUSH_LIMIT))
+		return true;
+
 	/*
 	 * Make sure that we can always add another "page" + "nr_pages",
 	 * requiring two entries instead of only a single one.
@@ -218,8 +220,6 @@ bool __tlb_remove_page_size(struct mmu_gather *tlb, struct page *page, int page_
 
 #endif /* MMU_GATHER_NO_GATHER */
 
-#ifdef CONFIG_MMU_GATHER_TABLE_FREE
-
 static void __tlb_remove_table_free(struct mmu_table_batch *batch)
 {
 	int i;
@@ -230,10 +230,8 @@ static void __tlb_remove_table_free(struct mmu_table_batch *batch)
 	free_page((unsigned long)batch);
 }
 
-#ifdef CONFIG_MMU_GATHER_RCU_TABLE_FREE
-
 /*
- * Semi RCU freeing of the page directories.
+ * RCU freeing of the page directories.
  *
  * This is needed by some architectures to implement software pagetable walkers.
  *
@@ -259,13 +257,13 @@ static void __tlb_remove_table_free(struct mmu_table_batch *batch)
  * means.
  *
  * What we do is batch the freed directory pages (tables) and RCU free them.
- * We use the sched RCU variant, as that guarantees that IRQ/preempt disabling
- * holds off grace periods.
+ * Disabling IRQs or preemption holds off RCU grace periods, so this protects
+ * both rcu_read_lock() and IRQ-disabling walkers.
  *
  * However, in order to batch these pages we need to allocate storage, this
  * allocation is deep inside the MM code and can thus easily fail on memory
- * pressure. To guarantee progress we fall back to single table freeing, see
- * the implementation of tlb_remove_table_one().
+ * pressure. To guarantee progress we fall back to single table freeing, which
+ * is also RCU-deferred - see the implementation of tlb_remove_table_one().
  *
  */
 
@@ -314,15 +312,6 @@ void tlb_remove_table_sync_rcu(void)
 {
 	synchronize_rcu();
 }
-
-#else /* !CONFIG_MMU_GATHER_RCU_TABLE_FREE */
-
-static void tlb_remove_table_free(struct mmu_table_batch *batch)
-{
-	__tlb_remove_table_free(batch);
-}
-
-#endif /* CONFIG_MMU_GATHER_RCU_TABLE_FREE */
 
 /*
  * If we want tlb_remove_table() to imply TLB invalidates.
@@ -402,13 +391,6 @@ static inline void tlb_table_init(struct mmu_gather *tlb)
 {
 	tlb->batch = NULL;
 }
-
-#else /* !CONFIG_MMU_GATHER_TABLE_FREE */
-
-static inline void tlb_table_flush(struct mmu_gather *tlb) { }
-static inline void tlb_table_init(struct mmu_gather *tlb) { }
-
-#endif /* CONFIG_MMU_GATHER_TABLE_FREE */
 
 static void tlb_flush_mmu_free(struct mmu_gather *tlb)
 {
@@ -500,7 +482,7 @@ void tlb_gather_mmu_vma(struct mmu_gather *tlb, struct vm_area_struct *vma)
 {
 	tlb_gather_mmu(tlb, vma->vm_mm);
 	tlb_update_vma_flags(tlb, vma);
-	if (is_vm_hugetlb_page(vma))
+	if (vma_is_hugetlb(vma))
 		/* All entries have the same size. */
 		tlb_change_page_size(tlb, huge_page_size(hstate_vma(vma)));
 }

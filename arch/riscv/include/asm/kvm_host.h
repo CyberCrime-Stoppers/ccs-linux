@@ -47,6 +47,8 @@
 #define KVM_REQ_STEAL_UPDATE		KVM_ARCH_REQ(6)
 
 #define __KVM_HAVE_ARCH_FLUSH_REMOTE_TLBS_RANGE
+#define __KVM_HAVE_MSI
+#define __KVM_HAVE_READONLY_MEM
 
 #define KVM_HAVE_MMU_RWLOCK
 
@@ -331,5 +333,6 @@ void kvm_riscv_vcpu_record_steal_time(struct kvm_vcpu *vcpu);
 
 /* Flags representing implementation specific details */
 DECLARE_STATIC_KEY_FALSE(kvm_riscv_vsstage_tlb_no_gpa);
+DECLARE_STATIC_KEY_FALSE(kvm_riscv_no_xenvcfg);
 
 #endif /* __RISCV_KVM_HOST_H__ */

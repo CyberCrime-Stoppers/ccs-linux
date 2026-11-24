@@ -51,6 +51,8 @@ u16 nvmet_set_feat_resv_notif_mask(struct nvmet_req *req, u32 mask)
 
 	if (nsid != U32_MAX) {
 		status = nvmet_req_find_ns(req);
+		if (status == (NVME_SC_INVALID_NS | NVME_STATUS_DNR))
+			return NVME_SC_INVALID_FIELD | NVME_STATUS_DNR;
 		if (status)
 			return status;
 		if (!req->ns->pr.enable)
@@ -75,6 +77,8 @@ u16 nvmet_get_feat_resv_notif_mask(struct nvmet_req *req)
 	u16 status;
 
 	status = nvmet_req_find_ns(req);
+	if (status == (NVME_SC_INVALID_NS | NVME_STATUS_DNR))
+		return NVME_SC_INVALID_FIELD | NVME_STATUS_DNR;
 	if (status)
 		return status;
 
@@ -94,6 +98,12 @@ void nvmet_execute_get_log_page_resv(struct nvmet_req *req)
 	u64 lost_count;
 	u64 cur_count;
 	u64 next_count;
+
+	status = nvmet_zero_sgl(req, 0, req->transfer_len);
+	if (status) {
+		nvmet_req_complete(req, status);
+		return;
+	}
 
 	mutex_lock(&log_mgr->lock);
 	if (!kfifo_get(&log_mgr->log_queue, &log))
@@ -145,7 +155,7 @@ static void nvmet_pr_add_resv_log(struct nvmet_ctrl *ctrl, u8 log_type,
 	log.nsid = cpu_to_le32(nsid);
 
 	if (!kfifo_put(&log_mgr->log_queue, log)) {
-		pr_info("a reservation log lost, cntlid:%d, log_type:%d, nsid:%d\n",
+		pr_info("a reservation log lost, cntlid:%d, log_type:%d, nsid:%u\n",
 			ctrl->cntlid, log_type, nsid);
 		log_mgr->lost_count++;
 	}
@@ -331,7 +341,7 @@ static u16 nvmet_pr_update_reg_attr(struct nvmet_pr *pr,
 		return NVME_SC_SUCCESS;
 	}
 
-	new = kmalloc_obj(*new, GFP_ATOMIC);
+	new = kmalloc_obj(*new, GFP_KERNEL);
 	if (!new)
 		return NVME_SC_INTERNAL;
 
@@ -585,11 +595,11 @@ static u16 nvmet_pr_preempt(struct nvmet_req *req,
 				&ctrl->hostid, abort);
 	}
 
-	if (holder == reg) {
+	if (holder == reg && prkey == holder->rkey) {
 		status = nvmet_pr_update_reg_attr(pr, holder,
 				nvmet_pr_update_holder_rtype, &rtype);
 		if (!status && original_rtype != rtype)
-			nvmet_pr_resv_released(pr, &reg->hostid);
+			nvmet_pr_resv_released(pr, &ctrl->hostid);
 		return status;
 	}
 
@@ -1036,7 +1046,7 @@ static int nvmet_pr_alloc_and_insert_pc_ref(struct nvmet_ns *ns,
 	struct nvmet_pr_per_ctrl_ref *pc_ref;
 	int ret;
 
-	pc_ref = kmalloc_obj(*pc_ref, GFP_ATOMIC);
+	pc_ref = kmalloc_obj(*pc_ref, GFP_KERNEL);
 	if (!pc_ref)
 		return  -ENOMEM;
 

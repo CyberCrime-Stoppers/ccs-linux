@@ -379,11 +379,6 @@ int kvm_arch_vcpu_runnable(struct kvm_vcpu *vcpu)
 		vcpu->arch.mp_state.mp_state == KVM_MP_STATE_RUNNABLE;
 }
 
-int kvm_arch_vcpu_should_kick(struct kvm_vcpu *vcpu)
-{
-	return kvm_vcpu_exiting_guest_mode(vcpu) == IN_GUEST_MODE;
-}
-
 bool kvm_arch_vcpu_in_kernel(struct kvm_vcpu *vcpu)
 {
 	unsigned long val;
@@ -1165,10 +1160,19 @@ static int kvm_loongarch_cpucfg_set_attr(struct kvm_vcpu *vcpu,
 			return -EINVAL;
 
 		/* All vCPUs need set the same PV features */
-		if ((kvm->arch.pv_features & LOONGARCH_PV_FEAT_UPDATED)
-				&& ((kvm->arch.pv_features & valid) != val))
+		spin_lock(&kvm->arch.pv_setting_lock);
+		if ((kvm->arch.pv_features & valid) == val) {
+			spin_unlock(&kvm->arch.pv_setting_lock);
+			return 0;
+		}
+
+		if (vcpu->arch.has_run) {
+			spin_unlock(&kvm->arch.pv_setting_lock);
 			return -EINVAL;
-		kvm->arch.pv_features = val | LOONGARCH_PV_FEAT_UPDATED;
+		}
+
+		kvm->arch.pv_features = val;
+		spin_unlock(&kvm->arch.pv_setting_lock);
 		return 0;
 	default:
 		return -ENXIO;
@@ -1853,6 +1857,10 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu)
 {
 	int r = -EINTR;
 	struct kvm_run *run = vcpu->run;
+
+	/* Mark vCPU has run at least once */
+	if (!vcpu->arch.has_run)
+		vcpu->arch.has_run = true;
 
 	if (vcpu->mmio_needed) {
 		if (!vcpu->mmio_is_write)

@@ -50,7 +50,7 @@ static struct landlock_domain *create_domain(const u32 num_layers)
 	struct landlock_domain *new_domain;
 
 	build_check_domain();
-	new_domain = kzalloc_flex(*new_domain, handled_masks, num_layers,
+	new_domain = kzalloc_flex(*new_domain, layers, num_layers,
 				  GFP_KERNEL_ACCOUNT);
 	if (!new_domain)
 		return ERR_PTR(-ENOMEM);
@@ -328,8 +328,8 @@ static int merge_ruleset(struct landlock_domain *const dst,
 	if (WARN_ON_ONCE(dst->num_layers < 1))
 		return -EINVAL;
 
-	dst->handled_masks[dst->num_layers - 1] =
-		landlock_upgrade_handled_access_masks(src->handled_masks);
+	dst->layers[dst->num_layers - 1] =
+		landlock_upgrade_handled_layer_config(src->layer);
 
 	/* Merges the @src inode tree. */
 	err = merge_tree(dst, src, LANDLOCK_KEY_INODE);
@@ -404,8 +404,8 @@ static int inherit_ruleset(struct landlock_domain *const parent,
 	/*
 	 * Copies the parent layer stack and leaves a space for the new layer.
 	 */
-	memcpy(child->handled_masks, parent->handled_masks,
-	       flex_array_size(parent, handled_masks, parent->num_layers));
+	memcpy(child->layers, parent->layers,
+	       flex_array_size(parent, layers, parent->num_layers));
 
 	if (WARN_ON_ONCE(!parent->hierarchy))
 		return -EINVAL;
@@ -439,9 +439,10 @@ landlock_merge_ruleset(struct landlock_domain *const parent,
 	int err;
 
 	might_sleep();
-	lockdep_assert_held(&ruleset->lock);
 	if (WARN_ON_ONCE(!ruleset))
 		return ERR_PTR(-EINVAL);
+
+	lockdep_assert_held(&ruleset->lock);
 
 	if (parent) {
 		if (parent->num_layers >= LANDLOCK_MAX_NUM_LAYERS)
@@ -478,7 +479,8 @@ landlock_merge_ruleset(struct landlock_domain *const parent,
 		return ERR_PTR(err);
 
 #ifdef CONFIG_SECURITY_LANDLOCK_LOG
-	new_dom->hierarchy->quiet_masks = ruleset->quiet_masks;
+	new_dom->hierarchy->quiet_access = ruleset->quiet_access;
+	new_dom->hierarchy->quiet_permission = ruleset->quiet_permission;
 #endif /* CONFIG_SECURITY_LANDLOCK_LOG */
 
 	return no_free_ptr(new_dom);
@@ -751,6 +753,49 @@ static void test_landlock_get_deny_masks(struct kunit *const test)
 					&layers1));
 }
 
+static void test_get_fs_access_mask(struct kunit *const test)
+{
+	static const struct {
+		struct layer_config config;
+		access_mask_t expected_fs;
+	} layers[] = {
+		{
+			.config.handled.net = LANDLOCK_ACCESS_NET_BIND_TCP,
+			.expected_fs = 0,
+		},
+		{
+			.config.handled.scope = LANDLOCK_SCOPE_SIGNAL,
+			.expected_fs = 0,
+		},
+		{
+			.config.handled.fs = LANDLOCK_ACCESS_FS_EXECUTE,
+			.expected_fs = LANDLOCK_ACCESS_FS_EXECUTE |
+				       LANDLOCK_ACCESS_FS_REFER,
+		},
+		{
+			.config.handled.fs = LANDLOCK_ACCESS_FS_REFER,
+			.expected_fs = LANDLOCK_ACCESS_FS_REFER,
+		},
+	};
+	struct landlock_domain *domain;
+	size_t i;
+
+	domain = kunit_kzalloc(test,
+			       struct_size(domain, layers, ARRAY_SIZE(layers)),
+			       GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, domain);
+	domain->num_layers = ARRAY_SIZE(layers);
+
+	for (i = 0; i < ARRAY_SIZE(layers); i++)
+		domain->layers[i] =
+			landlock_upgrade_handled_layer_config(layers[i].config);
+
+	for (i = 0; i < ARRAY_SIZE(layers); i++)
+		KUNIT_EXPECT_EQ_MSG(test, layers[i].expected_fs,
+				    landlock_get_fs_access_mask(domain, i),
+				    "layer %zu", i);
+}
+
 #endif /* CONFIG_SECURITY_LANDLOCK_KUNIT_TEST */
 
 #ifdef CONFIG_SECURITY_LANDLOCK_KUNIT_TEST
@@ -759,6 +804,7 @@ static struct kunit_case test_cases[] = {
 	/* clang-format off */
 	KUNIT_CASE(test_get_layer_deny_mask),
 	KUNIT_CASE(test_landlock_get_deny_masks),
+	KUNIT_CASE(test_get_fs_access_mask),
 	{}
 	/* clang-format on */
 };

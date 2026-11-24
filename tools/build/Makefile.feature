@@ -79,12 +79,13 @@ FEATURE_TESTS_BASIC :=                  \
         libelf-zstd                     \
         libnuma                         \
         numa_num_possible_cpus          \
-        libpython                       \
+        python-module                   \
         libslang                        \
         libtraceevent                   \
         libcpupower                     \
         pthread-attr-setaffinity-np     \
         pthread-barrier     		\
+        pthread-mutex-robust		\
         reallocarray                    \
         stackprotector-all              \
         timerfd                         \
@@ -113,16 +114,15 @@ FEATURE_TESTS_EXTRA :=                  \
          compile-x32                    \
          cplus-demangle                 \
          cxa-demangle                   \
-         gtk2                           \
-         gtk2-infobar                   \
+         gtk4                           \
          hello                          \
          babeltrace2-ctf-writer         \
          libcapstone                    \
          libcheck                       \
          libbfd-liberty                 \
          libbfd-liberty-z               \
+         libbfd-liberty-z-zstd          \
          libopencsd                     \
-         libperl                        \
          llvm                           \
          libbpf                         \
          libpfm4                        \
@@ -146,7 +146,7 @@ FEATURE_DISPLAY ?=              \
          libelf                 \
          libnuma                \
          numa_num_possible_cpus \
-         libpython              \
+         python-module          \
          libcapstone            \
          llvm-perf              \
          zlib                   \
@@ -161,7 +161,7 @@ FEATURE_DISPLAY ?=              \
 # Declare group members of a feature to display the logical OR of the detection
 # result instead of each member result.
 #
-FEATURE_GROUP_MEMBERS-libbfd = libbfd-liberty libbfd-liberty-z
+FEATURE_GROUP_MEMBERS-libbfd = libbfd-liberty libbfd-liberty-z libbfd-liberty-z-zstd
 
 #
 # Declare list of feature dependency packages that provide pkg-config files.

@@ -1089,7 +1089,7 @@ static int falcon_decode_var(struct fb_info *info, struct fb_var_screeninfo *var
 			/* Choose largest pixelclock <= wanted clock */
 			int i;
 			unsigned long pcl = ULONG_MAX;
-			pclock = 0;
+			pclock = NULL;
 			for (i = 1; i <= 4; i *= 2) {
 				if (f25.t * i >= var->pixclock &&
 				    f25.t * i < pcl) {
@@ -2065,6 +2065,15 @@ static void st_ovsc_switch(void)
 
 #ifdef ATAFB_EXT
 
+/*
+ * Only a Falcon can have a SuperVidel; a TT with a VME graphics card can
+ * have its framebuffer in the same address range.
+ */
+static bool ext_is_supervidel(void)
+{
+	return ATARIHW_PRESENT(VIDEL_SHIFTER) && external_addr >= 0xa0000000;
+}
+
 static int ext_encode_fix(struct fb_fix_screeninfo *fix, struct atafb_par *par)
 {
 	strcpy(fix->id, "Unknown Extern");
@@ -2083,8 +2092,7 @@ static int ext_encode_fix(struct fb_fix_screeninfo *fix, struct atafb_par *par)
 		 * SuperVidel 8bpp chunky (fb in SV RAM) uses the Falcon palette
 		 */
 		int visual = (external_vgaiobase ||
-			      (external_depth == 8 &&
-			       external_addr >= 0xa0000000)) ?
+			      (external_depth == 8 && ext_is_supervidel())) ?
 					 FB_VISUAL_PSEUDOCOLOR :
 					 FB_VISUAL_STATIC_PSEUDOCOLOR;
 		switch (external_pmode) {
@@ -2181,7 +2189,7 @@ static int ext_encode_var(struct fb_var_screeninfo *var, struct atafb_par *par)
 		var->transp.offset = 24;
 		var->transp.length = 8;
 	} else if (external_pmode == FB_TYPE_PACKED_PIXELS &&
-		   external_depth == 8 && external_addr >= 0xa0000000) {
+		   external_depth == 8 && ext_is_supervidel()) {
 		/* SuperVidel 8bpp chunky: palette has 8 bits per channel.
 		 * Without this, fb_get_color_depth() sees length 0 and
 		 * fbcon falls back to its 2-color palette — the console
@@ -2245,7 +2253,7 @@ static int ext_setcolreg(unsigned int regno, unsigned int red,
 		return 0;
 	}
 	if (external_pmode == FB_TYPE_PACKED_PIXELS && external_depth == 8 &&
-	    external_addr >= 0xa0000000) {
+	    ext_is_supervidel()) {
 		/* SuperVidel native 8bpp chunky scans out via the Falcon
 		 * palette registers, honoring all 8 bits per channel
 		 */
@@ -2454,7 +2462,7 @@ static void svblit_fillrect(struct fb_info *info,
 		((u32 *)info->pseudo_palette)[rect->color] : rect->color;
 
 	/* draw the first line with the CPU ... */
-	line = (u8 *)info->screen_base + rect->dy * pitch +
+	line = info->screen_buffer + rect->dy * pitch +
 	       rect->dx * bytespp;
 	switch (bytespp) {
 	case 1:
@@ -2818,29 +2826,6 @@ static void atafb_imageblit(struct fb_info *info, const struct fb_image *image)
 	}
 }
 
-static int
-atafb_ioctl(struct fb_info *info, unsigned int cmd, unsigned long arg)
-{
-	switch (cmd) {
-#ifdef FBCMD_GET_CURRENTPAR
-	case FBCMD_GET_CURRENTPAR:
-		if (copy_to_user((void *)arg, &current_par,
-				 sizeof(struct atafb_par)))
-			return -EFAULT;
-		return 0;
-#endif
-#ifdef FBCMD_SET_CURRENTPAR
-	case FBCMD_SET_CURRENTPAR:
-		if (copy_from_user(&current_par, (void *)arg,
-				   sizeof(struct atafb_par)))
-			return -EFAULT;
-		ata_set_par(&current_par);
-		return 0;
-#endif
-	}
-	return -EINVAL;
-}
-
 /* (un)blank/poweroff
  * 0 = unblank
  * 1 = blank
@@ -2922,7 +2907,6 @@ static struct fb_ops atafb_ops = {
 	.fb_fillrect	= atafb_fillrect,
 	.fb_copyarea	= atafb_copyarea,
 	.fb_imageblit	= atafb_imageblit,
-	.fb_ioctl =	atafb_ioctl,
 	__FB_DEFAULT_IOMEM_OPS_MMAP,
 };
 
@@ -3360,7 +3344,11 @@ static int __init atafb_probe(struct platform_device *pdev)
 		memset (screen_base, 0, external_len);
 
 		/* framebuffer in SV RAM: enable the SuperBlitter */
-		if (external_addr >= 0xa0000000) {
+		if (ext_is_supervidel() &&
+		    ((external_pmode == FB_TYPE_PACKED_PIXELS &&
+		      external_depth == 8) ||
+		     (external_pmode == -1 &&
+		      (external_depth == 16 || external_depth == 32)))) {
 			svblit_regs = ioremap(SVBLIT_REGS_PHYS, 0x100);
 			if (svblit_regs) {
 				svblit_fw = svblit_rd(SVBLIT_VERSION) & 0x1ff;

@@ -173,30 +173,43 @@ dmub_srv_get_fw_meta_info_from_raw_fw(struct dmub_srv_fw_meta_info_params *param
 	uint32_t inst_const_size_temp = params->inst_const_size;
 
 	/* First try custom psp footer size, if present */
-	if (params->custom_psp_footer_size) {
-		params->inst_const_size -= params->custom_psp_footer_size;
+	if (params->custom_psp_footer_size && inst_const_size_temp > params->custom_psp_footer_size) {
+		params->inst_const_size = inst_const_size_temp - params->custom_psp_footer_size;
 		fw_info = dmub_get_fw_meta_info(params);
 		if (fw_info) {
 			memcpy(fw_info_out, fw_info, sizeof(*fw_info));
 			return DMUB_STATUS_OK;
 		}
-		params->inst_const_size = inst_const_size_temp;
 	}
 
 	/* Try 256-byte psp footer size */
-	params->inst_const_size -= PSP_FOOTER_BYTES_256;
-	fw_info = dmub_get_fw_meta_info(params);
-	if (fw_info) {
-		memcpy(fw_info_out, fw_info, sizeof(*fw_info));
-		return DMUB_STATUS_OK;
+	if (inst_const_size_temp > PSP_FOOTER_BYTES_256) {
+		params->inst_const_size = inst_const_size_temp - PSP_FOOTER_BYTES_256;
+		fw_info = dmub_get_fw_meta_info(params);
+		if (fw_info) {
+			memcpy(fw_info_out, fw_info, sizeof(*fw_info));
+			return DMUB_STATUS_OK;
+		}
 	}
 
-	/* Try 512-byte psp footer size - final attempt */
-	params->inst_const_size -= PSP_FOOTER_BYTES_256; // 256 bytes already subtracted, subtract 256 again
-	fw_info = dmub_get_fw_meta_info(params);
-	if (fw_info) {
-		memcpy(fw_info_out, fw_info, sizeof(*fw_info));
-		return DMUB_STATUS_OK;
+	/* Try 512-byte psp footer size */
+	if (inst_const_size_temp > PSP_FOOTER_BYTES_512) {
+		params->inst_const_size = inst_const_size_temp - PSP_FOOTER_BYTES_512;
+		fw_info = dmub_get_fw_meta_info(params);
+		if (fw_info) {
+			memcpy(fw_info_out, fw_info, sizeof(*fw_info));
+			return DMUB_STATUS_OK;
+		}
+	}
+
+	/* Try 1932-byte psp footer size */
+	if (inst_const_size_temp > PSP_FOOTER_BYTES_1932) {
+		params->inst_const_size = inst_const_size_temp - PSP_FOOTER_BYTES_1932;
+		fw_info = dmub_get_fw_meta_info(params);
+		if (fw_info) {
+			memcpy(fw_info_out, fw_info, sizeof(*fw_info));
+			return DMUB_STATUS_OK;
+		}
 	}
 
 	/* Restore original inst_const_size and subtract default PSP footer size - default behaviour */
@@ -584,7 +597,7 @@ static bool dmub_srv_hw_setup(struct dmub_srv *dmub, enum dmub_asic asic)
 		return false;
 	}
 
-	/* set default inbox type if not overriden */
+	/* set default inbox type if not overridden */
 	if (dmub->inbox_type == DMUB_CMD_INTERFACE_DEFAULT) {
 		if (default_inbox_type != DMUB_CMD_INTERFACE_DEFAULT) {
 			/* use default inbox type as specified by DCN rev */
@@ -1315,11 +1328,63 @@ bool dmub_srv_get_outbox0_msg(struct dmub_srv *dmub, struct dmcub_trace_buf_entr
 	return dmub_rb_out_trace_buffer_front(&dmub->outbox0_rb, (void *)entry);
 }
 
+void dmub_srv_get_trace_snapshot(struct dmub_srv *dmub, struct dmub_trace_snapshot *trace_snapshot)
+{
+	const unsigned int snapshot_max_entry_count =
+			sizeof(trace_snapshot->traces) / sizeof(struct dmcub_trace_buf_entry);
+
+	struct dmub_trace_buf_header *trace_buf_header;
+	struct dmcub_trace_buf_entry *trace_buf;
+	unsigned int trace_buf_max_entry_count;
+	unsigned int entry_count, start_idx, first_chunk_entry_count;
+
+	if (!dmub || !dmub->fb_info || !trace_snapshot)
+		return;
+
+	// capture last trace entries from the DMCUB trace buffer
+	trace_buf_header = (struct dmub_trace_buf_header *)dmub->fb_info->fb[DMUB_WINDOW_5_TRACEBUFF].cpu_addr;
+	trace_buf_max_entry_count = dmub->fb_info->fb[DMUB_WINDOW_5_TRACEBUFF].size == 0 ? 0 :
+			(dmub->fb_info->fb[DMUB_WINDOW_5_TRACEBUFF].size -
+			sizeof(struct dmub_trace_buf_header)) /
+			sizeof(struct dmcub_trace_buf_entry);
+	trace_buf_max_entry_count = trace_buf_max_entry_count > DMUB_TRACE_BUFFER_SIZE ?
+			DMUB_TRACE_BUFFER_SIZE : trace_buf_max_entry_count;
+
+	if (trace_buf_header && trace_buf_max_entry_count > 0) {
+		entry_count = trace_buf_header->entry_count;
+		start_idx = 0;
+		if (entry_count >= snapshot_max_entry_count) {
+			start_idx = (entry_count - snapshot_max_entry_count) % trace_buf_max_entry_count;
+		}
+
+		trace_buf = (struct dmcub_trace_buf_entry *)(trace_buf_header + 1);
+
+		if (start_idx + snapshot_max_entry_count <= trace_buf_max_entry_count) {
+			// contiguous
+			memcpy(trace_snapshot->traces,
+					&trace_buf[start_idx],
+					sizeof(struct dmcub_trace_buf_entry) * snapshot_max_entry_count);
+		} else {
+			// wraparound case
+			first_chunk_entry_count = trace_buf_max_entry_count - start_idx;
+
+			memcpy(trace_snapshot->traces,
+					&trace_buf[start_idx],
+					sizeof(struct dmcub_trace_buf_entry) * first_chunk_entry_count);
+			memcpy(&trace_snapshot->traces[first_chunk_entry_count],
+					&trace_buf[0],
+					sizeof(struct dmcub_trace_buf_entry) * (snapshot_max_entry_count - first_chunk_entry_count));
+		}
+	}
+}
+
 bool dmub_srv_get_diagnostic_data(struct dmub_srv *dmub)
 {
 	if (!dmub || !dmub->hw_funcs.get_diagnostic_data)
 		return false;
-	dmub->hw_funcs.get_diagnostic_data(dmub);
+
+	dmub->hw_funcs.get_diagnostic_data(dmub, &dmub->debug.hw);
+	dmub_srv_get_trace_snapshot(dmub, &dmub->debug.trace_snapshot);
 
 	return true;
 }
@@ -1385,7 +1450,7 @@ void dmub_srv_set_power_state(struct dmub_srv *dmub, enum dmub_srv_power_state_t
 	dmub->power_state = dmub_srv_power_state;
 }
 
-enum dmub_status dmub_srv_reg_cmd_execute(struct dmub_srv *dmub, union dmub_rb_cmd *cmd)
+enum dmub_status dmub_srv_reg_cmd_execute(struct dmub_srv *dmub, const union dmub_rb_cmd *cmd)
 {
 	uint64_t num_pending = 0;
 
@@ -1411,7 +1476,10 @@ enum dmub_status dmub_srv_reg_cmd_execute(struct dmub_srv *dmub, union dmub_rb_c
 
 	/* clear last rsp ack and send message */
 	dmub->hw_funcs.clear_reg_inbox0_rsp_int_ack(dmub);
-	dmub->hw_funcs.send_reg_inbox0_cmd_msg(dmub, cmd);
+	/* hw_funcs signature is not const as some ASIC variants may reuse the
+	 * buffer; send_reg_inbox0_cmd_msg implementations only read from cmd.
+	 */
+	dmub->hw_funcs.send_reg_inbox0_cmd_msg(dmub, (union dmub_rb_cmd *)cmd);
 
 	dmub->reg_inbox0.num_submitted++;
 	dmub->reg_inbox0.is_pending = true;

@@ -15,7 +15,7 @@
 
 #ifdef CONFIG_NVHE_EL2_TRACING
 #define HYPERVISOR_EVENT_IDS 					\
-	. = ALIGN(PAGE_SIZE);					\
+	. = ALIGN(SZ_8);					\
 	__hyp_event_ids_start = .;				\
 	*(HYP_SECTION_NAME(.event_ids))				\
 	__hyp_event_ids_end = .;
@@ -213,6 +213,14 @@ SECTIONS
 	RO_DATA(PAGE_SIZE)
 
 	HYPERVISOR_RODATA_SECTIONS
+
+#ifdef CONFIG_NVHE_EL2_TRACING
+	.rodata.hyp_string_fmts : {
+		__hyp_string_fmts_start = .;
+		*(_hyp_string_fmts)
+		__hyp_string_fmts_end = .;
+	}
+#endif
 
 	.got : { *(.got) }
 	/*
@@ -432,6 +440,7 @@ ASSERT(swapper_pg_dir - tramp_pg_dir == TRAMP_SWAPPER_OFFSET,
 ASSERT(__relocate_new_kernel_end - __relocate_new_kernel_start <= SZ_4K,
        "kexec relocation code is bigger than 4 KiB")
 ASSERT(KEXEC_CONTROL_PAGE_SIZE >= SZ_4K, "KEXEC_CONTROL_PAGE_SIZE is broken")
-ASSERT(__relocate_new_kernel_start == arm64_relocate_new_kernel,
-       "kexec control page does not start with arm64_relocate_new_kernel")
+ASSERT(arm64_relocate_new_kernel >= __relocate_new_kernel_start &&
+       arm64_relocate_new_kernel < __relocate_new_kernel_end,
+       "kexec relocation code does not contain arm64_relocate_new_kernel")
 #endif

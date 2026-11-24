@@ -46,7 +46,7 @@
  * before remapping.
  *
  * Once a zone does not contain any valid data, be that through GC or user
- * block removal, it is queued for for a zone reset.  The reset operation
+ * block removal, it is queued for a zone reset.  The reset operation
  * carefully ensures that the RT device cache is flushed and all transactions
  * referencing the rmap have been committed to disk.
  */
@@ -1018,7 +1018,7 @@ xfs_zone_gc_reset_zones(
 		struct xfs_gc_bio	*chunk;
 		struct bio		*bio;
 
-		xfs_log_force_inode(rtg_rmap(rtg));
+		xfs_log_force_inode(rtg_rmap(rtg), false, NULL);
 
 		next = rtg_group(rtg)->xg_next_reset;
 		rtg_group(rtg)->xg_next_reset = NULL;

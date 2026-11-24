@@ -8,6 +8,7 @@
  */
 
 #include <linux/bitfield.h>
+#include <linux/kvm_host.h>
 #include <asm/kvm_pgtable.h>
 #include <asm/stage2_pgtable.h>
 
@@ -298,12 +299,13 @@ static int leaf_walker(const struct kvm_pgtable_visit_ctx *ctx,
 }
 
 int kvm_pgtable_get_leaf(struct kvm_pgtable *pgt, u64 addr,
-			 kvm_pte_t *ptep, s8 *level)
+			 kvm_pte_t *ptep, s8 *level,
+			 enum kvm_pgtable_walk_flags flags)
 {
 	struct leaf_walk_data data;
 	struct kvm_pgtable_walker walker = {
 		.cb	= leaf_walker,
-		.flags	= KVM_PGTABLE_WALK_LEAF,
+		.flags	= flags | KVM_PGTABLE_WALK_LEAF,
 		.arg	= &data,
 	};
 	int ret;
@@ -412,7 +414,7 @@ static bool hyp_map_walker_try_leaf(const struct kvm_pgtable_visit_ctx *ctx,
 		return true;
 	if (!kvm_pte_valid(ctx->old))
 		ctx->mm_ops->get_page(ctx->ptep);
-	else if (WARN_ON((ctx->old ^ new) & ~KVM_PTE_LEAF_ATTR_HI_SW))
+	else if ((ctx->old ^ new) & ~KVM_PTE_LEAF_ATTR_HI_SW)
 		return false;
 
 	smp_store_release(ctx->ptep, new);
@@ -428,6 +430,14 @@ static int hyp_map_walker(const struct kvm_pgtable_visit_ctx *ctx,
 
 	if (hyp_map_walker_try_leaf(ctx, data))
 		return 0;
+
+	/*
+	 * A valid entry here is a leaf that conflicts with the request.
+	 * Replacing a block with a table would need break-before-make, and
+	 * would leave the rest of the block unmapped.
+	 */
+	if (kvm_pte_valid(ctx->old))
+		return -EEXIST;
 
 	if (WARN_ON(ctx->level == KVM_PGTABLE_LAST_LEVEL))
 		return -EINVAL;

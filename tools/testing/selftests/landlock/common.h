@@ -9,10 +9,12 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <linux/nsfs.h>
 #include <linux/securebits.h>
 #include <sys/capability.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -34,7 +36,7 @@ static const char bin_wait_pipe_sandbox[] = "./wait-pipe-sandbox";
 static void _init_caps(struct __test_metadata *const _metadata, bool drop_all)
 {
 	cap_t cap_p;
-	/* Only these three capabilities are useful for the tests. */
+	/* Only these capabilities are useful for the tests. */
 	const cap_value_t caps[] = {
 		/* clang-format off */
 		CAP_AUDIT_CONTROL,
@@ -42,9 +44,11 @@ static void _init_caps(struct __test_metadata *const _metadata, bool drop_all)
 		CAP_MKNOD,
 		CAP_NET_ADMIN,
 		CAP_NET_BIND_SERVICE,
+		CAP_SETPCAP,
 		CAP_SETUID,
 		CAP_SYS_ADMIN,
 		CAP_SYS_CHROOT,
+		CAP_SYS_RAWIO,
 		/* clang-format on */
 	};
 	const unsigned int noroot = SECBIT_NOROOT | SECBIT_NOROOT_LOCKED;
@@ -128,6 +132,17 @@ static void __maybe_unused clear_ambient_cap(
 	EXPECT_EQ(1, cap_get_ambient(cap));
 	_change_cap(_metadata, CAP_INHERITABLE, cap, CAP_CLEAR);
 	EXPECT_EQ(0, cap_get_ambient(cap));
+}
+
+/* Returns true if the current process is in the initial user namespace. */
+static bool __maybe_unused is_in_init_user_ns(void)
+{
+	struct stat user_ns;
+
+	if (stat("/proc/self/ns/user", &user_ns))
+		return false;
+
+	return user_ns.st_ino == USER_NS_INIT_INO;
 }
 
 /* Receives an FD from a UNIX socket. Returns the received FD, or -errno. */

@@ -212,7 +212,7 @@ smb2_calc_signature(struct smb_rqst *rqst, struct TCP_Server_Info *server)
 	unsigned char smb2_signature[SMB2_HMACSHA256_SIZE];
 	struct kvec *iov = rqst->rq_iov;
 	struct smb2_hdr *shdr = (struct smb2_hdr *)iov[0].iov_base;
-	struct hmac_sha256_ctx hmac_ctx;
+	struct hmac_sha256_ctx hmac_ctx __cleanup(hmac_sha256_zeroize_ctx);
 	struct smb_rqst drqst;
 	__u64 sid = le64_to_cpu(shdr->SessionId);
 	u8 key[SMB2_NTLMV2_SESSKEY_SIZE];
@@ -250,7 +250,6 @@ smb2_calc_signature(struct smb_rqst *rqst, struct TCP_Server_Info *server)
 		memcpy(shdr->Signature, smb2_signature, SMB2_SIGNATURE_SIZE);
 
 	memzero_explicit(key, sizeof(key));
-	memzero_explicit(&hmac_ctx, sizeof(hmac_ctx));
 	return rc;
 }
 
@@ -712,9 +711,12 @@ smb2_check_receive(struct mid_q_entry *mid, struct TCP_Server_Info *server,
 		int rc;
 
 		rc = smb2_verify_signature(&rqst, server);
-		if (rc)
+		if (rc) {
 			cifs_server_dbg(VFS, "SMB signature verification returned error = %d\n",
-				 rc);
+					rc);
+			mid->mid_state = MID_RESPONSE_MALFORMED;
+			return rc;
+		}
 	}
 
 	return map_smb2_to_linux_error(mid->resp_buf, log_error);

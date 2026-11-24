@@ -34,6 +34,7 @@
 #include "amdgpu.h"
 #include "amdgpu_xgmi.h"
 #include "amdgpu_reset.h"
+#include "soc_v1_0.h"
 #include "kfd_priv.h"
 #include "kfd_svm.h"
 #include "kfd_migrate.h"
@@ -1007,7 +1008,7 @@ svm_range_split_array(void *ppnew, void *ppold, size_t size,
 		kvfree(new);
 		return -ENOMEM;
 	}
-	kvfree(pold);
+	/* The caller frees pold once all arrays of the range are split */
 	*(void **)ppold = old;
 	*(void **)ppnew = new;
 
@@ -1018,19 +1019,47 @@ static int
 svm_range_split_pages(struct svm_range *new, struct svm_range *old,
 		      uint64_t start, uint64_t last)
 {
+	dma_addr_t *old_dma[MAX_GPU_INSTANCE];
 	uint64_t npages = last - start + 1;
+	bool has_dma_addr = false;
 	int i, r;
 
+	/*
+	 * Split the arrays of all GPUs before replacing any of them, the old
+	 * range must stay intact if one fails.
+	 */
 	for (i = 0; i < MAX_GPU_INSTANCE; i++) {
-		r = svm_range_split_array(&new->dma_addr[i], &old->dma_addr[i],
+		old_dma[i] = old->dma_addr[i];
+		if (old->dma_addr[i])
+			has_dma_addr = true;
+		r = svm_range_split_array(&new->dma_addr[i], &old_dma[i],
 					  sizeof(*old->dma_addr[i]), old->start,
 					  npages, new->start, new->npages,
 					  old->actual_loc ? &new->vram_pages : NULL);
-		if (r)
+		if (r) {
+			/* new->dma_addr[] goes with the new range */
+			while (i--)
+				if (old_dma[i] != old->dma_addr[i])
+					kvfree(old_dma[i]);
 			return r;
+		}
 	}
-	if (old->actual_loc)
+	for (i = 0; i < MAX_GPU_INSTANCE; i++) {
+		if (old_dma[i] == old->dma_addr[i])
+			continue;
+		kvfree(old->dma_addr[i]);
+		old->dma_addr[i] = old_dma[i];
+	}
+	if (old->actual_loc) {
+		/*
+		 * Pages migrated by prefetch have no dma_addr until they are
+		 * mapped on a GPU. A fully resident range still splits exactly,
+		 * old->npages isn't adjusted yet here.
+		 */
+		if (!has_dma_addr && old->vram_pages == old->npages)
+			new->vram_pages = new->npages;
 		old->vram_pages -= new->vram_pages;
+	}
 
 	return 0;
 }
@@ -1253,7 +1282,7 @@ svm_range_get_pte_flags(struct kfd_node *node, struct amdgpu_vm *vm,
 	bool coherent = flags & (KFD_IOCTL_SVM_FLAG_COHERENT | KFD_IOCTL_SVM_FLAG_EXT_COHERENT);
 	bool ext_coherent = flags & KFD_IOCTL_SVM_FLAG_EXT_COHERENT;
 	unsigned int mtype_local, mtype_remote;
-	bool is_aid_a1, is_local;
+	bool is_aid_a1, is_local, is_spx;
 
 	if (domain == SVM_RANGE_VRAM_DOMAIN)
 		bo_node = prange->svm_bo->node;
@@ -1341,20 +1370,34 @@ svm_range_get_pte_flags(struct kfd_node *node, struct amdgpu_vm *vm,
 		mapping_flags |= AMDGPU_VM_MTYPE_NC;
 		break;
 	case IP_VERSION(12, 1, 0):
-		is_aid_a1 = (node->adev->rev_id & 0x10);
+		is_aid_a1 = SOC_V1_0_DIE_REV_AID(node->adev->rev_id) == 1;
 		is_local = (domain == SVM_RANGE_VRAM_DOMAIN) &&
 				(bo_node->adev == node->adev);
 
 		mtype_local = amdgpu_mtype_local == 0 ? AMDGPU_VM_MTYPE_RW :
 				amdgpu_mtype_local == 1 ? AMDGPU_VM_MTYPE_NC :
 				is_aid_a1 ? AMDGPU_VM_MTYPE_RW : AMDGPU_VM_MTYPE_NC;
-		mtype_remote = is_aid_a1 ? AMDGPU_VM_MTYPE_NC : AMDGPU_VM_MTYPE_UC;
+		/* Remote memory defaults to MTYPE_UC on GFX 12.1 and can be
+		 * overridden through the amdgpu_mtype_remote module parameter
+		 * (0 = MTYPE_NC, 1 = MTYPE_UC).
+		 */
+		mtype_remote = amdgpu_mtype_remote == 0 ? AMDGPU_VM_MTYPE_NC :
+				AMDGPU_VM_MTYPE_UC;
 		snoop = true;
 
-		if (is_local) /* local HBM  */ {
+		if (ext_coherent) {
+			is_spx = amdgpu_xcp_query_partition_mode(node->adev->xcp_mgr,
+								 AMDGPU_XCP_FL_NONE) ==
+				 AMDGPU_SPX_PARTITION_MODE;
+			/* AID A0 requires MTYPE_UC for extended-scope coherent
+			 * local memory in DPX/QPX/CPX modes.
+			 */
+			if (is_local && (is_aid_a1 || is_spx))
+				mapping_flags |= mtype_local;
+			else
+				mapping_flags |= AMDGPU_VM_MTYPE_UC;
+		} else if (is_local) /* local HBM  */ {
 			mapping_flags |= mtype_local;
-		} else if (ext_coherent) {
-			mapping_flags |= AMDGPU_VM_MTYPE_UC;
 		} else {
 			/* system memory or remote VRAM */
 			mapping_flags |= mtype_remote;
@@ -1369,7 +1412,13 @@ svm_range_get_pte_flags(struct kfd_node *node, struct amdgpu_vm *vm,
 		mapping_flags |= AMDGPU_VM_PAGE_EXECUTABLE;
 
 	pte_flags = AMDGPU_PTE_VALID;
-	pte_flags |= (domain == SVM_RANGE_VRAM_DOMAIN) ? 0 : AMDGPU_PTE_SYSTEM;
+	/* SPM-backed VRAM is accessed through the system memory path and
+	 * requires the SYSTEM bit.
+	 */
+	if (amdgpu_virt_vram_is_spm(node->adev))
+		pte_flags |= AMDGPU_PTE_SYSTEM;
+	else
+		pte_flags |= (domain == SVM_RANGE_VRAM_DOMAIN) ? 0 : AMDGPU_PTE_SYSTEM;
 	pte_flags |= snoop ? AMDGPU_PTE_SNOOPED : 0;
 	if (gc_ip_version >= IP_VERSION(12, 0, 0))
 		pte_flags |= AMDGPU_PTE_IS_PTE;
@@ -1752,12 +1801,15 @@ static int svm_range_validate_and_map(struct mm_struct *mm,
 		}
 
 		/*
-		 * If prange with always mapped flag, update mapping on GPUs with
-		 * ACCESS attribute
+		 * If prange with always mapped flag is not mapped or migrated
+		 * yet, update mapping on GPUs with ACCESS attribute. Don't add
+		 * them otherwise, ACCESS GPUs may be on different XGMI hives,
+		 * that would force hmm_range_fault to migrate VRAM back to ram.
 		 */
-		if (prange->flags & KFD_IOCTL_SVM_FLAG_GPU_ALWAYS_MAPPED)
-			bitmap_or(ctx->bitmap, ctx->bitmap, prange->bitmap_access,
-				  MAX_GPU_INSTANCE);
+		if (bitmap_empty(ctx->bitmap, MAX_GPU_INSTANCE) &&
+		    prange->flags & KFD_IOCTL_SVM_FLAG_GPU_ALWAYS_MAPPED)
+			bitmap_copy(ctx->bitmap, prange->bitmap_access,
+				    MAX_GPU_INSTANCE);
 	} else {
 		bitmap_or(ctx->bitmap, prange->bitmap_access,
 			  prange->bitmap_aip, MAX_GPU_INSTANCE);
@@ -1857,11 +1909,12 @@ static int svm_range_validate_and_map(struct mm_struct *mm,
 
 		svm_range_lock(prange);
 
-		/* Free backing memory of hmm_range if it was initialized
-		 * Override return value to TRY AGAIN only if prior returns
-		 * were successful
+		/*
+		 * Retry if the pages were invalidated after they were taken.
+		 * Only check that when taking them succeeded: a range can exist
+		 * without a notifier, e.g. when allocating its PFN array failed.
 		 */
-		if (range && !amdgpu_hmm_range_valid(range) && !r) {
+		if (!r && !amdgpu_hmm_range_valid(range)) {
 			pr_debug("hmm update the range, need validate again\n");
 			r = -EAGAIN;
 		}
@@ -1939,7 +1992,7 @@ static void svm_range_restore_work(struct work_struct *work)
 	struct mm_struct *mm;
 	int evicted_ranges;
 	int invalid;
-	int r;
+	int r = 0;
 
 	svms = container_of(dwork, struct svm_range_list, restore_work);
 	evicted_ranges = atomic_read(&svms->evicted_ranges);
@@ -2013,8 +2066,10 @@ out_reschedule:
 	mmap_write_unlock(mm);
 	mutex_unlock(&process_info->lock);
 
-	/* If validation failed, reschedule another attempt */
-	if (evicted_ranges) {
+	/* If validation failed, reschedule another attempt, unless the
+	 * device is gone for good
+	 */
+	if (evicted_ranges && r != -ENODEV) {
 		pr_debug("reschedule to restore svm range\n");
 		queue_delayed_work(system_freezable_wq, &svms->restore_work,
 			msecs_to_jiffies(AMDGPU_SVM_RANGE_RESTORE_DELAY_MS));
@@ -2079,21 +2134,30 @@ svm_range_evict(struct svm_range *prange, struct mm_struct *mm,
 		if (prange->start <= last && prange->last >= start)
 			atomic_inc(&prange->invalid);
 
+		/* The MMU notifier must not return before the GPU has stopped
+		 * accessing the invalidated pages. Only the first eviction stops
+		 * the queues, which takes milliseconds (HWS preemption on every
+		 * GPU of the process). Serialize all evictions of this process so
+		 * that a concurrent invalidation of another range waits until
+		 * that quiesce has completed instead of returning while queues
+		 * still run on stale PTEs.
+		 */
+		mutex_lock(&svms->evict_lock);
 		evicted_ranges = atomic_inc_return(&svms->evicted_ranges);
-		if (evicted_ranges != 1)
-			return r;
+		if (evicted_ranges == 1) {
+			pr_debug("evicting svms 0x%p range [0x%lx 0x%lx]\n",
+				 prange->svms, prange->start, prange->last);
 
-		pr_debug("evicting svms 0x%p range [0x%lx 0x%lx]\n",
-			 prange->svms, prange->start, prange->last);
+			/* First eviction, stop the queues */
+			r = kgd2kfd_quiesce_mm(mm, KFD_QUEUE_EVICTION_TRIGGER_SVM);
+			if (r)
+				pr_debug("failed to quiesce KFD\n");
 
-		/* First eviction, stop the queues */
-		r = kgd2kfd_quiesce_mm(mm, KFD_QUEUE_EVICTION_TRIGGER_SVM);
-		if (r)
-			pr_debug("failed to quiesce KFD\n");
-
-		pr_debug("schedule to restore svm %p ranges\n", svms);
-		queue_delayed_work(system_freezable_wq, &svms->restore_work,
-			msecs_to_jiffies(AMDGPU_SVM_RANGE_RESTORE_DELAY_MS));
+			pr_debug("schedule to restore svm %p ranges\n", svms);
+			queue_delayed_work(system_freezable_wq, &svms->restore_work,
+					   msecs_to_jiffies(AMDGPU_SVM_RANGE_RESTORE_DELAY_MS));
+		}
+		mutex_unlock(&svms->evict_lock);
 	} else {
 		unsigned long s, l;
 		uint32_t trigger;
@@ -2134,14 +2198,25 @@ static struct svm_range *svm_range_clone(struct svm_range *old)
 		svm_range_free(new, false);
 		return NULL;
 	}
-	if (old->svm_bo) {
+
+	/* old->lock keeps old->svm_bo alive while taking the reference */
+	mutex_lock(&old->lock);
+	if (svm_bo_ref_unless_zero(old->svm_bo)) {
 		new->ttm_res = old->ttm_res;
 		new->offset = old->offset;
-		new->svm_bo = svm_range_bo_ref(old->svm_bo);
+		new->svm_bo = old->svm_bo;
 		spin_lock(&new->svm_bo->list_lock);
 		list_add(&new->svm_bo_list, &new->svm_bo->range_list);
 		spin_unlock(&new->svm_bo->list_lock);
 	}
+	mutex_unlock(&old->lock);
+
+	/* prange only holds an svm_bo reference while ttm_res is set, unref
+	 * outside old->lock, svm_range_bo_release takes it and would deadlock.
+	 */
+	if (new->svm_bo && !new->ttm_res)
+		svm_range_bo_unref(new->svm_bo);
+
 	new->flags = old->flags;
 	new->preferred_loc = old->preferred_loc;
 	new->prefetch_loc = old->prefetch_loc;
@@ -3364,6 +3439,7 @@ void svm_range_list_fini(struct kfd_process *p)
 		svm_range_free(prange, true);
 	}
 
+	mutex_destroy(&p->svms.evict_lock);
 	mutex_destroy(&p->svms.lock);
 
 	pr_debug("process pid %d svms 0x%p done\n",
@@ -3377,6 +3453,7 @@ int svm_range_list_init(struct kfd_process *p)
 
 	svms->objects = RB_ROOT_CACHED;
 	mutex_init(&svms->lock);
+	mutex_init(&svms->evict_lock);
 	INIT_LIST_HEAD(&svms->list);
 	atomic_set(&svms->evicted_ranges, 0);
 	atomic_set(&svms->drain_pagefaults, 0);
@@ -4197,14 +4274,13 @@ int kfd_criu_restore_svm(struct kfd_process *p,
 	svm_priv_data_size = sizeof(struct kfd_criu_svm_range_priv_data) +
 								svm_attrs_size;
 
+	if (*priv_data_offset + svm_priv_data_size > max_priv_data_size)
+		return -EINVAL;
+
 	criu_svm_md = kzalloc(svm_object_md_size, GFP_KERNEL);
 	if (!criu_svm_md) {
 		pr_err("failed to allocate memory to store svm metadata\n");
 		return -ENOMEM;
-	}
-	if (*priv_data_offset + svm_priv_data_size > max_priv_data_size) {
-		ret = -EINVAL;
-		goto exit;
 	}
 
 	ret = copy_from_user(&criu_svm_md->data, user_priv_ptr + *priv_data_offset,

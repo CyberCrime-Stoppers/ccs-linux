@@ -133,15 +133,26 @@ void inv_sensors_timestamp_interrupt(struct inv_sensors_timestamp *ts,
 		return;
 
 	/* no previous data, compute theoretical value from interrupt */
-	if (ts->timestamp == 0) {
+	if (!ts->init) {
 		/* elapsed time: sensor period * sensor samples number */
 		interval = (s64)ts->period * (s64)sample_nb;
-		ts->timestamp = timestamp - interval;
+		delta = timestamp - interval;
+		/* prevent next timestamp to be lower than the last one */
+		if ((delta + ts->period) > ts->timestamp)
+			ts->timestamp = delta;
+		ts->init = true;
+
 	}
 
 	/* update delta timestamps and estimated period */
 	it = &ts->delta;
 	ts->delta_counter += sample_nb;
+	/* reset in case of odr change */
+	if (ts->new_mult) {
+		it->lo = 0;
+		it->up = 0;
+		ts->delta_counter = 0;
+	}
 	delta = timestamp - it->up;
 	delta_threshold = INV_SENSORS_TIMESTAMP_MIN(INV_SENSORS_MIN_IT_DELTA, ts->chip.jitter);
 	if (delta >= delta_threshold) {
@@ -161,17 +172,22 @@ void inv_sensors_timestamp_interrupt(struct inv_sensors_timestamp *ts,
 	it->lo = it->up;
 	it->up = timestamp;
 	delta = it->up - it->lo;
-	if (it->lo != 0) {
+	if (it->lo != 0 && !ts->new_mult) {
 		/* compute period and check validity */
 		period = div_s64(delta, sample_nb);
 		valid = inv_validate_period(ts, period);
 	}
 
-	/* if interrupt interval is valid, sync with interrupt timestamp */
+	/*
+	 * If interrupt interval is valid, sync with interrupt timestamp.
+	 * Otherwise, use estimated value while ensuring interrupt timestamp
+	 * remains the maximum possible value.
+	 */
+	period = inv_align_timestamp_it(ts, sample_nb);
 	if (valid)
-		ts->period = inv_align_timestamp_it(ts, sample_nb);
+		ts->period = period;
 	else
-		ts->period = ts->mult * ts->chip_period.val;
+		ts->period = min(ts->mult * ts->chip_period.val, period);
 }
 EXPORT_SYMBOL_NS_GPL(inv_sensors_timestamp_interrupt, "IIO_INV_SENSORS_TIMESTAMP");
 
@@ -179,7 +195,7 @@ void inv_sensors_timestamp_apply_odr(struct inv_sensors_timestamp *ts,
 				     u32 fifo_period, size_t fifo_nb,
 				     unsigned int fifo_no)
 {
-	s64 interval;
+	s64 interval, timestamp;
 	u32 fifo_mult;
 
 	if (ts->new_mult == 0)
@@ -202,7 +218,10 @@ void inv_sensors_timestamp_apply_odr(struct inv_sensors_timestamp *ts,
 		fifo_period = fifo_mult * ts->chip_period.val;
 		/* computes time interval between interrupt and this sample */
 		interval = (s64)(fifo_nb - fifo_no) * (s64)fifo_period;
-		ts->timestamp = ts->it.up - interval;
+		timestamp = ts->it.up - interval;
+		/* prevent next timestamp to be lower than current one */
+		if ((timestamp + ts->period) > ts->timestamp)
+			ts->timestamp = timestamp;
 	}
 }
 EXPORT_SYMBOL_NS_GPL(inv_sensors_timestamp_apply_odr, "IIO_INV_SENSORS_TIMESTAMP");

@@ -24,6 +24,8 @@ struct ovl_config {
 struct ovl_sb {
 	struct super_block *sb;
 	dev_t pseudo_dev;
+	/* Idmap of the first lower layer on this fs */
+	const struct mnt_idmap *lower_idmap;
 	/* Unusable (conflicting) uuid */
 	bool bad_uuid;
 	/* Used as a lower layer (but maybe also as upper) */
@@ -105,7 +107,7 @@ static inline struct vfsmount *ovl_upper_mnt(struct ovl_fs *ofs)
 	return ofs->layers[0].mnt;
 }
 
-static inline struct mnt_idmap *ovl_upper_mnt_idmap(struct ovl_fs *ofs)
+static inline const struct mnt_idmap *ovl_upper_mnt_idmap(struct ovl_fs *ofs)
 {
 	return mnt_idmap(ovl_upper_mnt(ofs));
 }

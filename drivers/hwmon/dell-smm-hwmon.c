@@ -1030,6 +1030,9 @@ static int dell_smm_write(struct device *dev, enum hwmon_sensor_types type, u32 
 	case hwmon_pwm:
 		switch (attr) {
 		case hwmon_pwm_input:
+			if (val < 0 || val > 255)
+				return -EINVAL;
+
 			pwm = clamp_val(DIV_ROUND_CLOSEST(val, data->i8k_pwm_mult), 0,
 					data->i8k_fan_max);
 
@@ -1142,7 +1145,7 @@ static int dell_smm_init_cdev(struct device *dev, u8 fan_num)
 	if (!name)
 		return -ENOMEM;
 
-	cdata = devm_kmalloc(dev, sizeof(*cdata), GFP_KERNEL);
+	cdata = devm_kmalloc_obj(dev, *cdata);
 	if (cdata) {
 		cdata->fan_num = fan_num;
 		cdata->data = data;
@@ -1196,9 +1199,9 @@ static int dell_smm_init_hwmon(struct device *dev)
 					 i + 1);
 		}
 
-		data->fan_nominal_speed[i] = devm_kmalloc_array(dev, data->i8k_fan_max + 1,
-								sizeof(*data->fan_nominal_speed[i]),
-								GFP_KERNEL);
+		data->fan_nominal_speed[i] = devm_kmalloc_objs(dev,
+							       *data->fan_nominal_speed[i],
+							       data->i8k_fan_max + 1);
 		if (!data->fan_nominal_speed[i])
 			continue;
 
@@ -1231,7 +1234,7 @@ static int dell_smm_init_data(struct device *dev, const struct dell_smm_ops *ops
 {
 	struct dell_smm_data *data;
 
-	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, *data);
 	if (!data)
 		return -ENOMEM;
 
@@ -1248,6 +1251,12 @@ static int dell_smm_init_data(struct device *dev, const struct dell_smm_ops *ops
 		return -EINVAL;
 	}
 	data->i8k_fan_max = fan_max ? : I8K_FAN_HIGH;
+	/* The BIOS takes the fan state in a single byte */
+	if (data->i8k_fan_max > U8_MAX) {
+		dev_err(dev, "maximum fan state %u is too large (max %u)\n",
+			data->i8k_fan_max, U8_MAX);
+		return -EINVAL;
+	}
 	data->i8k_pwm_mult = DIV_ROUND_UP(255, data->i8k_fan_max);
 
 	return 0;
@@ -1544,6 +1553,14 @@ static const struct dmi_system_id i8k_whitelist_fan_control[] __initconst = {
 		.driver_data = (void *)&i8k_fan_control_data[I8K_FAN_34A3_35A3],
 	},
 	{
+		.ident = "Dell Latitude 5420",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
+			DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "Latitude 5420"),
+		},
+		.driver_data = (void *)&i8k_fan_control_data[I8K_FAN_30A3_31A3],
+	},
+	{
 		.ident = "Dell Latitude 5480",
 		.matches = {
 			DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
@@ -1632,6 +1649,22 @@ static const struct dmi_system_id i8k_whitelist_fan_control[] __initconst = {
 		.driver_data = (void *)&i8k_fan_control_data[I8K_FAN_34A3_35A3],
 	},
 	{
+		.ident = "Dell Precision 3650 Tower",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
+			DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "Precision 3650 Tower"),
+		},
+		.driver_data = (void *)&i8k_fan_control_data[I8K_FAN_30A3_31A3],
+	},
+	{
+		.ident = "Dell Optiplex 7090",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
+			DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "OptiPlex 7090"),
+		},
+		.driver_data = (void *)&i8k_fan_control_data[I8K_FAN_30A3_31A3],
+	},
+	{
 		.ident = "Dell XPS 9315",
 		.matches = {
 			DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
@@ -1652,6 +1685,14 @@ static const struct dmi_system_id i8k_whitelist_fan_control[] __initconst = {
 		.matches = {
 			DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
 			DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "Dell G15 5511"),
+		},
+		.driver_data = (void *)&i8k_fan_control_data[I8K_FAN_30A3_31A3],
+	},
+	{
+		.ident = "Dell 16 DC16250",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
+			DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "Dell 16 DC16250"),
 		},
 		.driver_data = (void *)&i8k_fan_control_data[I8K_FAN_30A3_31A3],
 	},
@@ -1694,7 +1735,7 @@ static int dell_smm_wmi_probe(struct wmi_device *wdev, const void *context)
 	struct dell_smm_ops *ops;
 	int ret;
 
-	ops = devm_kzalloc(&wdev->dev, sizeof(*ops), GFP_KERNEL);
+	ops = devm_kzalloc_obj(&wdev->dev, *ops);
 	if (!ops)
 		return -ENOMEM;
 

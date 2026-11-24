@@ -261,7 +261,7 @@ static int steelseries_srws1_probe(struct hid_device *hdev,
 	size_t name_sz;
 	char *name;
 
-	drv_data = devm_kzalloc(&hdev->dev, sizeof(*drv_data), GFP_KERNEL);
+	drv_data = devm_kzalloc_obj(&hdev->dev, *drv_data);
 	if (drv_data == NULL) {
 		hid_err(hdev, "can't alloc SRW-S1 memory\n");
 		return -ENOMEM;
@@ -354,6 +354,13 @@ static const struct dmi_system_id steelseries_msi_rgb_dmi_table[] = {
 			DMI_MATCH(DMI_SYS_VENDOR, "Micro-Star International Co., Ltd."),
 			DMI_MATCH(DMI_PRODUCT_NAME, "Raider A18 HX A9WJG"),
 			DMI_MATCH(DMI_BOARD_NAME, "MS-182L"),
+		},
+	},
+	{
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Micro-Star International Co., Ltd."),
+			DMI_MATCH(DMI_PRODUCT_NAME, "Raider A18 HX A7VHG"),
+			DMI_MATCH(DMI_BOARD_NAME, "MS-182K"),
 		},
 	},
 	{ }
@@ -578,7 +585,7 @@ static int steelseries_probe(struct hid_device *hdev, const struct hid_device_id
 #endif
 	}
 
-	sd = devm_kzalloc(&hdev->dev, sizeof(*sd), GFP_KERNEL);
+	sd = devm_kzalloc_obj(&hdev->dev, *sd);
 	if (!sd)
 		return -ENOMEM;
 	hid_set_drvdata(hdev, sd);

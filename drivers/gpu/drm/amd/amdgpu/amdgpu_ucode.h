@@ -477,6 +477,7 @@ union amdgpu_firmware_header {
  */
 enum AMDGPU_UCODE_ID {
 	AMDGPU_UCODE_ID_CAP = 0,
+	AMDGPU_UCODE_ID_MP5,
 	AMDGPU_UCODE_ID_SDMA0,
 	AMDGPU_UCODE_ID_SDMA1,
 	AMDGPU_UCODE_ID_SDMA2,
@@ -502,6 +503,10 @@ enum AMDGPU_UCODE_ID {
 	AMDGPU_UCODE_ID_CP_RS64_MEC_P1_STACK,
 	AMDGPU_UCODE_ID_CP_RS64_MEC_P2_STACK,
 	AMDGPU_UCODE_ID_CP_RS64_MEC_P3_STACK,
+	AMDGPU_UCODE_ID_CP_RS64_MEC_P4_STACK,
+	AMDGPU_UCODE_ID_CP_RS64_MEC_P5_STACK,
+	AMDGPU_UCODE_ID_CP_RS64_MEC_P6_STACK,
+	AMDGPU_UCODE_ID_CP_RS64_MEC_P7_STACK,
 	AMDGPU_UCODE_ID_CP_MEC1,
 	AMDGPU_UCODE_ID_CP_MEC1_JT,
 	AMDGPU_UCODE_ID_CP_MEC2,
@@ -566,6 +571,14 @@ enum amdgpu_firmware_load_type {
 	AMDGPU_FW_LOAD_RLC_BACKDOOR_AUTO,
 };
 
+enum amdgpu_firmware_sign_type {
+	AMDGPU_FW_SIGN_DEFAULT = 0,
+	AMDGPU_FW_SIGN_ALT,
+	AMDGPU_FW_SIGN_PREPROD,
+	/* Unexpected combination of signing bits, default firmware may not work */
+	AMDGPU_FW_SIGN_UNKNOWN,
+};
+
 enum amdgpu_ucode_required {
 	AMDGPU_UCODE_OPTIONAL,
 	AMDGPU_UCODE_REQUIRED,
@@ -601,6 +614,7 @@ struct amdgpu_firmware_info {
 struct amdgpu_firmware {
 	struct amdgpu_firmware_info ucode[AMDGPU_UCODE_ID_MAXIMUM];
 	enum amdgpu_firmware_load_type load_type;
+	enum amdgpu_firmware_sign_type sign_type;
 	struct amdgpu_bo *fw_buf;
 	unsigned int fw_size;
 	unsigned int max_ucodes;

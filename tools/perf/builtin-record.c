@@ -1169,6 +1169,21 @@ static int record__update_evlist_pollfd_from_thread(struct record *rec,
 		int e_pos = rec->index_map[i].evlist_pollfd_index;
 		int t_pos = rec->index_map[i].thread_pollfd_index;
 
+		if (e_entries[e_pos].fd == -1 || e_entries[e_pos].events == 0) {
+			/*
+			 * If the control file descriptor was closed, then evlist__ctlfd_process()
+			 * will have called evlist__finalize_ctlfd() on the PREVIOUS loop iteration
+			 * to cleanly set the core evlist's e_entries[e_pos].fd to -1.
+			 *
+			 * Since nonfilterable items are skipped by fdarray__filter(), the
+			 * thread's local t_entries[t_pos] retains its original state.
+			 * We must explicitly propagate the finalized -1 state to t_entries
+			 * BEFORE evaluating the strict equivalence check below.
+			 */
+			t_entries[t_pos].fd = -1;
+			t_entries[t_pos].events = 0;
+		}
+
 		if (e_entries[e_pos].fd != t_entries[t_pos].fd ||
 		    e_entries[e_pos].events != t_entries[t_pos].events) {
 			pr_err("Thread and evlist pollfd index mismatch\n");
@@ -1565,7 +1580,7 @@ static struct perf_event_header finished_init_event = {
 
 static void record__adjust_affinity(struct record *rec, struct mmap *map)
 {
-	if (rec->opts.affinity != PERF_AFFINITY_SYS &&
+	if (map->core.cpu.cpu >= 0 && rec->opts.affinity != PERF_AFFINITY_SYS &&
 	    !bitmap_equal(thread->mask->affinity.bits, map->affinity_mask.bits,
 			  thread->mask->affinity.nbits)) {
 		bitmap_zero(thread->mask->affinity.bits, thread->mask->affinity.nbits);
@@ -3689,8 +3704,8 @@ static int record__mmap_cpu_mask_init(struct mmap_cpu_mask *mask, struct perf_cp
 		return 0;
 
 	perf_cpu_map__for_each_cpu_skip_any(cpu, idx, cpus) {
-		/* Return ENODEV is input cpu is greater than max cpu */
-		if ((unsigned long)cpu.cpu > mask->nbits)
+		/* Return ENODEV if the CPU index is outside the mask. */
+		if ((unsigned long)cpu.cpu >= mask->nbits)
 			return -ENODEV;
 		__set_bit(cpu.cpu, mask->bits);
 	}

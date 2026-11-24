@@ -216,12 +216,10 @@ int kvm_riscv_gstage_map_page(struct kvm_gstage *gstage,
 	pte_t *ptep;
 	int ret;
 
-	out_map->addr = gpa;
-	out_map->level = 0;
-
 	ret = gstage_page_size_to_level(gstage, page_size, &out_map->level);
 	if (ret)
 		return ret;
+	out_map->addr = ALIGN_DOWN(gpa, page_size);
 
 	/*
 	 * A RISC-V implementation can choose to either:
@@ -280,6 +278,8 @@ int kvm_riscv_gstage_map_page(struct kvm_gstage *gstage,
 						    out_map->level, true);
 		} else if (ALIGN_DOWN(PFN_PHYS(pte_pfn(ptep_get(ptep))), page_size) == hpa) {
 			kvm_riscv_gstage_update_pte_prot(gstage, ptep_level, gpa, ptep, prot);
+			out_map->level = ptep_level;
+			out_map->pte = ptep_get(ptep);
 			return 0;
 		}
 	}
@@ -452,6 +452,28 @@ bool kvm_riscv_gstage_unmap_range(struct kvm_gstage *gstage,
 		if (!(gstage->flags & KVM_GSTAGE_FLAGS_LOCAL) && may_block && addr < end)
 			cond_resched_rwlock_write(&gstage->kvm->mmu_lock);
 	}
+
+	return flush;
+}
+
+/*
+ * Clear every G-stage mapping and free all page tables below the PGD.
+ * kvm_riscv_gstage_unmap_range() only clears leaf PTEs and leaves the
+ * page tables in place, so it cannot be used to tear down a G-stage.
+ */
+bool kvm_riscv_gstage_unmap_all(struct kvm_gstage *gstage)
+{
+	u32 level = gstage->pgd_levels - 1;
+	pte_t *pgd = (pte_t *)gstage->pgd;
+	unsigned long i, page_size;
+	bool flush = false;
+
+	if (gstage_level_to_page_size(gstage, level, &page_size))
+		return false;
+
+	for (i = 0; i < kvm_riscv_gstage_pgd_size / sizeof(pte_t); i++)
+		flush |= kvm_riscv_gstage_op_pte(gstage, i * page_size, &pgd[i],
+						 level, GSTAGE_OP_CLEAR);
 
 	return flush;
 }
